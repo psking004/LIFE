@@ -57,7 +57,9 @@ class LifeRepository(
             voteDao.insertVotes(SeedData.initialVotes)
             scoreDao.insertUserScores(SeedData.initialScores)
         }
-        // Note: New process/app session always starts logged out.
+        // Restore active session if valid and account is ACTIVE
+        authRepository.restoreSessionIfValid()
+
         // Attempt background sync with Supabase remote backend
         try {
             supabaseSyncManager.syncFromRemote()
@@ -70,6 +72,8 @@ class LifeRepository(
     val currentUserId: Flow<String?> = authRepository.currentUserId
 
     fun observeCurrentUser(): Flow<User?> = authRepository.observeCurrentUser()
+
+    suspend fun restoreSessionIfValid(): Boolean = authRepository.restoreSessionIfValid()
 
     suspend fun requestLoginOtp(registerNumber: String, password: String): Result<OtpChallenge> {
         return authRepository.requestLoginOtp(registerNumber, password)

@@ -46,7 +46,7 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
     // --- State Flows ---
 
     val currentUser: StateFlow<User?> = repository.observeCurrentUser()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val problems: StateFlow<List<IdeaNode>> = repository.getProblems()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -174,6 +174,31 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onSearchQueryChange(query: String) {
         _searchQuery.value = query
+    }
+
+    /**
+     * Direct password-based login (OTP step temporarily disabled).
+     * Authenticates via real backend and navigates straight to LIFE upon ACTIVE status.
+     */
+    fun login(registerNumber: String, password: String, onFirstLoginNeeded: (User) -> Unit = {}) {
+        viewModelScope.launch {
+            _isLoggingIn.value = true
+            _loginError.value = null
+            val result = repository.login(registerNumber, password)
+            _isLoggingIn.value = false
+            result.onSuccess { user ->
+                _activeOtpChallenge.value = null
+                _loginError.value = null
+                _uiMessages.emit(UiMessage("Welcome back, ${user.name.ifEmpty { user.registerNumber }}!"))
+                if (user.isFirstLogin) {
+                    onFirstLoginNeeded(user)
+                }
+            }.onFailure { e ->
+                val errorMsg = e.message ?: "Authentication failed"
+                _loginError.value = errorMsg
+                _uiMessages.emit(UiMessage(errorMsg, isError = true))
+            }
+        }
     }
 
     /**

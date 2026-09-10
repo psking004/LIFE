@@ -121,7 +121,9 @@ fun LifeApp(
             } else {
                 LoginScreen(
                     onLoginSubmit = { reg, pass ->
-                        viewModel.requestLoginOtp(reg, pass)
+                        viewModel.login(reg, pass, onFirstLoginNeeded = { u ->
+                            firstLoginUser = u
+                        })
                     },
                     serverError = loginError,
                     isLoading = isLoggingIn,

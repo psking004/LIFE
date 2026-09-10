@@ -42,6 +42,27 @@ interface SupabaseAuthApi {
         @Header("Authorization") bearerToken: String
     ): Response<Unit>
 
+    @POST("auth/v1/factors")
+    suspend fun enrollFactor(
+        @Header("Authorization") bearerToken: String,
+        @Body request: Map<String, String>
+    ): Response<com.example.data.remote.dto.SupabaseFactorDto>
+
+    @POST("auth/v1/factors/{factorId}/challenge")
+    suspend fun createChallenge(
+        @Header("Authorization") bearerToken: String,
+        @retrofit2.http.Path("factorId") factorId: String,
+        @Body request: Map<String, String> = emptyMap()
+    ): Response<com.example.data.remote.dto.SupabaseChallengeDto>
+
+    @POST("auth/v1/factors/{factorId}/verify")
+    suspend fun verifyFactor(
+        @Header("Authorization") bearerToken: String,
+        @retrofit2.http.Path("factorId") factorId: String,
+        @Body request: Map<String, String>
+    ): Response<SupabaseAuthTokenResponse>
+
+    // Legacy OTP - removing these as we switch to MFA factors
     @POST("auth/v1/otp")
     suspend fun sendOtp(
         @Body request: Map<String, @JvmSuppressWildcards Any>

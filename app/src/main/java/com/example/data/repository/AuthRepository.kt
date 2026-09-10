@@ -26,6 +26,8 @@ data class OtpChallenge(
     val maskedPhoneNumber: String,
     val fullPhoneNumber: String,
     val email: String,
+    val factorId: String,
+    val challengeId: String,
     val timestamp: Long = System.currentTimeMillis()
 )
 
@@ -44,6 +46,9 @@ class AuthRepository(
     companion object {
         private const val TAG = "LifeAuth"
 
+        // In-memory process-level active user ID: survives Activity lifecycle, onPause, onStop, Recent Apps, and rotation
+        private val _currentProcessUserId = MutableStateFlow<String?>(null)
+
         fun normalizeRegisterNumber(raw: String): String {
             return raw.trim().uppercase()
         }
@@ -57,16 +62,100 @@ class AuthRepository(
             val last4 = if (clean.length >= 4) clean.takeLast(4) else clean.padStart(4, '0')
             return "******$last4"
         }
+
+        /**
+         * For test resets and explicit session clearing.
+         */
+        fun resetProcessState() {
+            _currentProcessUserId.value = null
+        }
     }
 
-    // In-memory per-process active user ID (NOT auto-restored on app relaunch)
-    private val _currentProcessUserId = MutableStateFlow<String?>(null)
     val currentUserId: Flow<String?> = _currentProcessUserId
 
     fun observeCurrentUser(): Flow<User?> {
         return _currentProcessUserId.combine(userDao.getAllUsers()) { userId, users ->
             if (userId == null) null else users.find { it.id == userId }?.toDomain()
         }.flowOn(dispatcher)
+    }
+
+    /**
+     * Restores session if an existing valid session exists in AuthSessionManager
+     * and the account is ACTIVE and not suspended.
+     */
+    suspend fun restoreSessionIfValid(): Boolean = withContext(dispatcher) {
+        // If already set in process memory, verify user validity
+        val currentId = _currentProcessUserId.value
+        if (currentId != null) {
+            val user = userDao.getUserById(currentId)
+            if (user == null || user.accountStatus != AccountStatus.ACTIVE.name || user.isSuspended) {
+                logout()
+                return@withContext false
+            }
+            return@withContext true
+        }
+
+        // Try restoring from persisted session
+        val session = sessionManager.getSession() ?: return@withContext false
+        val user = userDao.getUserById(session.userId)
+        if (user == null || user.accountStatus != AccountStatus.ACTIVE.name || user.isSuspended) {
+            sessionManager.clearSession()
+            _currentProcessUserId.value = null
+            SupabaseClient.currentAccessToken.set(null)
+            return@withContext false
+        }
+
+        if (session.expiresAt > System.currentTimeMillis()) {
+            _currentProcessUserId.value = session.userId
+            SupabaseClient.currentAccessToken.set(session.accessToken)
+            Log.i(TAG, "Restored active session for ${user.registerNumber}")
+            return@withContext true
+        } else if (session.refreshToken.isNotBlank()) {
+            return@withContext refreshSessionIfNeeded()
+        } else {
+            sessionManager.clearSession()
+            _currentProcessUserId.value = null
+            SupabaseClient.currentAccessToken.set(null)
+            return@withContext false
+        }
+    }
+
+    /**
+     * Refreshes the Supabase token using refreshToken when nearing expiration or expired.
+     */
+    suspend fun refreshSessionIfNeeded(): Boolean = withContext(dispatcher) {
+        val session = sessionManager.getSession() ?: return@withContext false
+        if (session.expiresAt > System.currentTimeMillis() + 60_000) {
+            return@withContext true
+        }
+        if (session.refreshToken.isBlank()) {
+            logout()
+            return@withContext false
+        }
+        try {
+            val response = authApi.refreshToken(mapOf("refresh_token" to session.refreshToken))
+            if (response.isSuccessful && response.body()?.accessToken != null) {
+                val body = response.body()!!
+                val newAccess = body.accessToken!!
+                val newRefresh = body.refreshToken ?: session.refreshToken
+                val expiresIn = body.expiresIn ?: 3600L
+                sessionManager.updateTokens(newAccess, newRefresh, expiresIn)
+                SupabaseClient.currentAccessToken.set(newAccess)
+                _currentProcessUserId.value = session.userId
+                Log.i(TAG, "Supabase session refreshed successfully")
+                true
+            } else {
+                logout()
+                false
+            }
+        } catch (e: Exception) {
+            if (session.expiresAt <= System.currentTimeMillis()) {
+                logout()
+                false
+            } else {
+                true
+            }
+        }
     }
 
     fun observeAllLoginEvents(): Flow<List<LoginEvent>> {
@@ -85,7 +174,7 @@ class AuthRepository(
      * Step 1 & 2: Account Authorization Check and Password Verification.
      * Generates and dispatches a real OTP to the student's registered mobile number.
      */
-    suspend fun requestLoginOtp(registerNumber: String, password: String): Result<OtpChallenge> = withContext(dispatcher) {
+        suspend fun requestLoginOtp(registerNumber: String, password: String): Result<OtpChallenge> = withContext(dispatcher) {
         val normalizedReg = normalizeRegisterNumber(registerNumber)
         if (normalizedReg.isEmpty()) {
             return@withContext Result.failure(IllegalArgumentException("Please enter a valid Register Number"))
@@ -95,171 +184,249 @@ class AuthRepository(
         }
 
         Log.d("LIFE_AUTH", "LOGIN_STARTED")
-        Log.d("LIFE_REAL_LOGIN", "REGISTER_NUMBER_RECEIVED")
         Log.i(TAG, "Step 1: Account status lookup for $normalizedReg")
 
         // 1. Account Check
         val userEntity = userDao.getUserByRegisterNumber(normalizedReg)
         if (userEntity == null) {
-            Log.d("LIFE_REAL_LOGIN", "PROFILE_NOT_FOUND")
-            Log.w(TAG, "User $normalizedReg not found")
             return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
         }
 
         val domainUser = userEntity.toDomain()
-
         when (domainUser.accountStatus) {
-            AccountStatus.PENDING -> {
-                Log.w(TAG, "Account is pending admin approval: $normalizedReg")
-                return@withContext Result.failure(IllegalStateException("Your account is awaiting administrator approval."))
-            }
-            AccountStatus.SUSPENDED -> {
-                Log.w(TAG, "Account is suspended: $normalizedReg")
-                return@withContext Result.failure(IllegalStateException("Your account has been suspended. Contact the administrator."))
-            }
-            AccountStatus.REJECTED -> {
-                Log.w(TAG, "Account is rejected: $normalizedReg")
-                return@withContext Result.failure(IllegalStateException("Your account is not authorized."))
-            }
-            AccountStatus.ACTIVE -> {
-                // Continue to Step 2: Password Authentication
-            }
+            AccountStatus.PENDING -> return@withContext Result.failure(IllegalStateException("Your account is awaiting administrator approval."))
+            AccountStatus.SUSPENDED -> return@withContext Result.failure(IllegalStateException("Your account has been suspended. Contact the administrator."))
+            AccountStatus.REJECTED -> return@withContext Result.failure(IllegalStateException("Your account is not authorized."))
+            AccountStatus.ACTIVE -> { /* Proceed */ }
         }
 
-        // 2. Password Verification
+        // 2. Password Verification via Supabase
         val authEmail = mapToAuthEmail(normalizedReg)
-        var passwordVerified = false
-
+        var accessToken = ""
+        
         try {
             val response = authApi.signInWithPassword(
-                mapOf(
-                    "email" to authEmail,
-                    "password" to password.trim()
-                )
+                mapOf("email" to authEmail, "password" to password.trim())
             )
             if (response.isSuccessful && response.body()?.accessToken != null) {
-                passwordVerified = true
-                Log.i(TAG, "Supabase GoTrue password authenticated successfully for $normalizedReg")
+                accessToken = response.body()!!.accessToken!!
+                SupabaseClient.currentAccessToken.set(accessToken)
+                
+                // Set authUserId on the local UserEntity if missing
+                val supabaseUserId = response.body()?.user?.id
+                if (supabaseUserId != null && userEntity.authUserId != supabaseUserId) {
+                    userDao.updateAuthUserId(userEntity.id, supabaseUserId)
+                }
+            } else {
+                return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Supabase Auth password check network: ${e.message}")
+            return@withContext Result.failure(IllegalStateException("Network error connecting to authentication server"))
         }
 
-        if (!passwordVerified) {
-            // Check verified password hash
-            val matchesHash = userEntity.passwordHash == password.trim() ||
-                    (normalizedReg == "23CSE001" && (password.trim() == "pass123" || password.trim() == "admin123"))
-            if (matchesHash) {
-                passwordVerified = true
-            }
-        }
-
-        if (!passwordVerified) {
-            Log.d("LIFE_REAL_LOGIN", "AUTH_FAILURE")
-            Log.w(TAG, "Password verification failed for $normalizedReg")
-            return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
-        }
-
-        Log.d("LIFE_AUTH", "PASSWORD_SUCCESS")
-        Log.d("LIFE_REAL_LOGIN", "AUTH_SUCCESS")
-
-        // 3. Dispatch OTP to the registered phone number
+        // 3. MFA Factor Enrollment or Verification
         val phone = domainUser.phoneNumber.ifEmpty { "9876541234" }
         val masked = maskPhoneNumber(phone)
+        var factorId = ""
 
         try {
-            authApi.sendOtp(
-                mapOf(
-                    "phone" to phone,
-                    "email" to authEmail,
-                    "create_user" to false
-                )
-            )
-            Log.i(TAG, "Supabase Auth OTP dispatched for $normalizedReg")
+            // First check if they already have a phone factor
+            val userResp = authApi.getUser("Bearer $accessToken")
+            val factors = userResp.body()?.factors ?: emptyList()
+            val phoneFactor = factors.find { it.factorType == "phone" && it.status == "verified" }
+            
+            if (phoneFactor != null) {
+                factorId = phoneFactor.id
+            } else {
+                // Enroll new phone factor
+                val enrollResp = authApi.enrollFactor("Bearer $accessToken", mapOf(
+                    "factor_type" to "phone",
+                    "phone" to phone
+                ))
+                if (enrollResp.isSuccessful && enrollResp.body() != null) {
+                    factorId = enrollResp.body()!!.id
+                } else {
+                    return@withContext Result.failure(IllegalStateException("Failed to enroll MFA factor"))
+                }
+            }
+            
+            // Create challenge (sends SMS)
+            val challengeResp = authApi.createChallenge("Bearer $accessToken", factorId)
+            if (challengeResp.isSuccessful && challengeResp.body() != null) {
+                val challengeId = challengeResp.body()!!.id
+                return@withContext Result.success(OtpChallenge(
+                    userId = userEntity.id,
+                    registerNumber = normalizedReg,
+                    maskedPhoneNumber = masked,
+                    fullPhoneNumber = phone,
+                    email = authEmail,
+                    factorId = factorId,
+                    challengeId = challengeId,
+                    timestamp = System.currentTimeMillis()
+                ))
+            } else {
+                return@withContext Result.failure(IllegalStateException("Failed to create MFA challenge"))
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "Supabase OTP send request: ${e.message}")
+            return@withContext Result.failure(IllegalStateException("Network error configuring MFA"))
         }
-
-        Log.d("LIFE_AUTH", "OTP_SENT")
-
-        val challenge = OtpChallenge(
-            userId = userEntity.id,
-            registerNumber = normalizedReg,
-            maskedPhoneNumber = masked,
-            fullPhoneNumber = phone,
-            email = authEmail,
-            timestamp = System.currentTimeMillis()
-        )
-
-        Result.success(challenge)
     }
 
-    /**
-     * Step 3: Verifies 6-digit OTP and establishes authenticated in-memory session.
-     * Records LOGIN_SUCCESS login activity event upon completion.
-     */
     suspend fun verifyOtp(challenge: OtpChallenge, otpCode: String): Result<User> = withContext(dispatcher) {
         val cleanOtp = otpCode.trim()
         if (cleanOtp.length != 6 || !cleanOtp.all { it.isDigit() }) {
             return@withContext Result.failure(IllegalArgumentException("Invalid OTP. Please enter a 6-digit code."))
         }
 
-        // Check expiration (5 minutes validity)
         val elapsed = System.currentTimeMillis() - challenge.timestamp
         if (elapsed > 5 * 60 * 1000) {
             return@withContext Result.failure(IllegalStateException("OTP expired. Please request a new code."))
         }
 
-        var otpVerified = false
+        val token = SupabaseClient.currentAccessToken.get() ?: return@withContext Result.failure(IllegalStateException("Missing auth token"))
 
-        // Attempt Supabase GoTrue OTP verification
         try {
-            val verifyRes = authApi.verifyOtp(
+            val verifyRes = authApi.verifyFactor(
+                "Bearer $token", 
+                challenge.factorId,
                 mapOf(
-                    "type" to "sms",
-                    "phone" to challenge.fullPhoneNumber,
-                    "token" to cleanOtp
+                    "challenge_id" to challenge.challengeId,
+                    "code" to cleanOtp
                 )
             )
+            
             if (verifyRes.isSuccessful && verifyRes.body()?.accessToken != null) {
-                val token = verifyRes.body()?.accessToken
-                SupabaseClient.currentAccessToken.set(token)
-                otpVerified = true
-                Log.i(TAG, "Supabase Auth OTP verified remotely for ${challenge.registerNumber}")
+                val newAccessToken = verifyRes.body()!!.accessToken!!
+                val newRefreshToken = verifyRes.body()!!.refreshToken ?: ""
+                SupabaseClient.currentAccessToken.set(newAccessToken)
+                
+                // Session is now AAL2
+                val userEntity = userDao.getUserById(challenge.userId)
+                    ?: return@withContext Result.failure(IllegalStateException("User profile not found"))
+
+                _currentProcessUserId.value = userEntity.id
+                
+                sessionManager.saveSession(
+                    accessToken = newAccessToken,
+                    refreshToken = newRefreshToken,
+                    userId = userEntity.id,
+                    registerNumber = userEntity.registerNumber,
+                    expiresInSeconds = verifyRes.body()!!.expiresIn ?: 3600
+                )
+
+                try {
+                    val loginEvent = LoginEventEntity(
+                        id = UUID.randomUUID().toString(),
+                        userId = userEntity.id,
+                        registerNumber = userEntity.registerNumber,
+                        userName = userEntity.name.ifEmpty { "Student ${userEntity.registerNumber}" },
+                        loginAt = System.currentTimeMillis(),
+                        loginStatus = "SUCCESS",
+                        deviceType = "Android",
+                        appVersion = "1.0.0",
+                        sessionId = newAccessToken // Or parse JWT for session_id
+                    )
+                    loginEventDao.insertLoginEvent(loginEvent)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to record login event: ${e.message}")
+                }
+
+                return@withContext Result.success(userEntity.toDomain())
+            } else {
+                return@withContext Result.failure(IllegalArgumentException("Invalid OTP"))
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Supabase Auth OTP verification call: ${e.message}")
+            return@withContext Result.failure(IllegalStateException("Network error during OTP verification"))
+        }
+    }
+
+    /**
+     * Direct password-based login (OTP step temporarily disabled).
+     *
+     * Flow:
+     * 1. Register Number + Password validation
+     * 2. Verify account exists in local database (Admin created/authorized accounts only; no self-registration)
+     * 3. Check AccountStatus:
+     *    - PENDING -> blocked
+     *    - SUSPENDED -> blocked
+     *    - REJECTED -> blocked
+     *    - ACTIVE -> allowed
+     * 4. Real password verification using configured Supabase Auth backend (signInWithPassword)
+     * 5. Capture real Supabase accessToken, refreshToken, and authUserId
+     * 6. Establish in-memory process session and persist tokens
+     * 7. Record SUCCESS LoginEvent in audit trail
+     */
+    suspend fun login(registerNumber: String, password: String): Result<User> = withContext(dispatcher) {
+        val normalizedReg = normalizeRegisterNumber(registerNumber)
+        if (normalizedReg.isEmpty()) {
+            return@withContext Result.failure(IllegalArgumentException("Please enter a valid Register Number"))
+        }
+        if (password.trim().isEmpty()) {
+            return@withContext Result.failure(IllegalArgumentException("Please enter your password"))
         }
 
-        // For valid active accounts, accept 6-digit OTP verification
-        if (!otpVerified && cleanOtp.length == 6) {
-            otpVerified = true
+        Log.d("LIFE_AUTH", "DIRECT_LOGIN_STARTED for $normalizedReg")
+
+        // 1. Verify account exists in local database (Admin-created/authorized accounts only)
+        val userEntity = userDao.getUserByRegisterNumber(normalizedReg)
+            ?: return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
+
+        val domainUser = userEntity.toDomain()
+
+        // 2. Verify account status
+        when (domainUser.accountStatus) {
+            AccountStatus.PENDING -> return@withContext Result.failure(IllegalStateException("Your account is awaiting administrator approval."))
+            AccountStatus.SUSPENDED -> return@withContext Result.failure(IllegalStateException("Your account has been suspended. Contact the administrator."))
+            AccountStatus.REJECTED -> return@withContext Result.failure(IllegalStateException("Your account is not authorized."))
+            AccountStatus.ACTIVE -> {
+                if (domainUser.isSuspended) {
+                    return@withContext Result.failure(IllegalStateException("Your account has been suspended. Contact the administrator."))
+                }
+                // Proceed
+            }
         }
 
-        if (!otpVerified) {
-            return@withContext Result.failure(IllegalArgumentException("Invalid OTP"))
+        // 3. Password Verification via configured real Supabase Auth backend
+        val authEmail = mapToAuthEmail(normalizedReg)
+        val accessToken: String
+        val refreshToken: String
+        val expiresIn: Long
+
+        try {
+            val response = authApi.signInWithPassword(
+                mapOf("email" to authEmail, "password" to password.trim())
+            )
+            if (response.isSuccessful && response.body()?.accessToken != null) {
+                val body = response.body()!!
+                accessToken = body.accessToken!!
+                refreshToken = body.refreshToken ?: ""
+                expiresIn = body.expiresIn ?: 3600L
+                SupabaseClient.currentAccessToken.set(accessToken)
+
+                // Sync authUserId on local UserEntity from Supabase Auth user ID
+                val supabaseUserId = body.user?.id
+                if (supabaseUserId != null && userEntity.authUserId != supabaseUserId) {
+                    userDao.updateAuthUserId(userEntity.id, supabaseUserId)
+                }
+            } else {
+                return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
+            }
+        } catch (e: Exception) {
+            return@withContext Result.failure(IllegalStateException("Network error connecting to authentication server"))
         }
 
-        Log.d("LIFE_AUTH", "OTP_VERIFIED")
-        Log.d("LIFE_AUTH", "SESSION_STARTED")
-
-        val userEntity = userDao.getUserById(challenge.userId)
-            ?: userDao.getUserByRegisterNumber(challenge.registerNumber)
-            ?: return@withContext Result.failure(IllegalStateException("User profile not found"))
-
-        // Establish per-process session
+        // 4. Establish Session (Per-process in-memory session + DataStore token storage)
         _currentProcessUserId.value = userEntity.id
 
-        val sessionId = UUID.randomUUID().toString()
         sessionManager.saveSession(
-            accessToken = "auth_$sessionId",
-            refreshToken = "refresh_$sessionId",
+            accessToken = accessToken,
+            refreshToken = refreshToken,
             userId = userEntity.id,
             registerNumber = userEntity.registerNumber,
-            expiresInSeconds = 3600
+            expiresInSeconds = expiresIn
         )
 
-        // Record Successful Login Event in Audit Trail
+        // 5. Record Login Event in local audit trail (SUCCESS recorded after password auth & ACTIVE status)
         try {
             val loginEvent = LoginEventEntity(
                 id = UUID.randomUUID().toString(),
@@ -270,31 +437,14 @@ class AuthRepository(
                 loginStatus = "SUCCESS",
                 deviceType = "Android",
                 appVersion = "1.0.0",
-                sessionId = sessionId
+                sessionId = accessToken
             )
             loginEventDao.insertLoginEvent(loginEvent)
-            Log.i(TAG, "Login activity event recorded for ${userEntity.registerNumber}")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to record login event: ${e.message}")
         }
 
         Result.success(userEntity.toDomain())
-    }
-
-    /**
-     * Backward-compatible direct login for automated unit test flows.
-     */
-    suspend fun login(registerNumber: String, password: String): Result<User> = withContext(dispatcher) {
-        val otpRes = requestLoginOtp(registerNumber, password)
-        otpRes.fold(
-            onSuccess = { challenge ->
-                // Automatically verify with valid OTP in direct login method
-                verifyOtp(challenge, "123456")
-            },
-            onFailure = { error ->
-                Result.failure(error)
-            }
-        )
     }
 
     /**
