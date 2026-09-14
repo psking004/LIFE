@@ -7,6 +7,8 @@ data class User(
     val name: String = "",
     val phoneNumber: String = "",
     val department: String = "Computer Science & Engineering",
+    val email: String = "",
+    val emailVerified: Boolean = false,
     val accountStatus: AccountStatus = AccountStatus.ACTIVE,
     val isFirstLogin: Boolean = false,
     val isSuspended: Boolean = (accountStatus == AccountStatus.SUSPENDED),

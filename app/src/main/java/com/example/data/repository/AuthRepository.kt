@@ -31,6 +31,21 @@ data class OtpChallenge(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+data class EmailOtpChallenge(
+    val userId: String,
+    val registerNumber: String,
+    val maskedEmail: String,
+    val expiresInSeconds: Int,
+    val accessToken: String,
+    val refreshToken: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+sealed class LoginStep {
+    data class Authenticated(val user: User) : LoginStep()
+    data class OtpRequired(val challenge: EmailOtpChallenge) : LoginStep()
+}
+
 /**
  * Repository responsible for Supabase GoTrue authentication, deterministic
  * register-number-to-identity mapping, per-process session lifecycle, OTP verification,
@@ -356,7 +371,7 @@ class AuthRepository(
      * 6. Establish in-memory process session and persist tokens
      * 7. Record SUCCESS LoginEvent in audit trail
      */
-    suspend fun login(registerNumber: String, password: String): Result<User> = withContext(dispatcher) {
+    suspend fun login(registerNumber: String, password: String): Result<LoginStep> = withContext(dispatcher) {
         val normalizedReg = normalizeRegisterNumber(registerNumber)
         if (normalizedReg.isEmpty()) {
             return@withContext Result.failure(IllegalArgumentException("Please enter a valid Register Number"))
@@ -415,36 +430,116 @@ class AuthRepository(
             return@withContext Result.failure(IllegalStateException("Network error connecting to authentication server"))
         }
 
-        // 4. Establish Session (Per-process in-memory session + DataStore token storage)
-        _currentProcessUserId.value = userEntity.id
-
-        sessionManager.saveSession(
-            accessToken = accessToken,
-            refreshToken = refreshToken,
-            userId = userEntity.id,
-            registerNumber = userEntity.registerNumber,
-            expiresInSeconds = expiresIn
-        )
-
-        // 5. Record Login Event in local audit trail (SUCCESS recorded after password auth & ACTIVE status)
+        // 4. Request Email OTP (Edge Function)
         try {
-            val loginEvent = LoginEventEntity(
-                id = UUID.randomUUID().toString(),
-                userId = userEntity.id,
-                registerNumber = userEntity.registerNumber,
-                userName = userEntity.name.ifEmpty { "Student ${userEntity.registerNumber}" },
-                loginAt = System.currentTimeMillis(),
-                loginStatus = "SUCCESS",
-                deviceType = "Android",
-                appVersion = "1.0.0",
-                sessionId = accessToken
-            )
-            loginEventDao.insertLoginEvent(loginEvent)
+            val otpResponse = authApi.sendLoginOtp("Bearer $accessToken")
+            if (otpResponse.isSuccessful && otpResponse.body() != null) {
+                val otpBody = otpResponse.body()!!
+                if (otpBody.alreadyVerifiedToday) {
+                    // Fully authenticated
+                    _currentProcessUserId.value = userEntity.id
+                    sessionManager.saveSession(
+                        accessToken = accessToken,
+                        refreshToken = refreshToken,
+                        userId = userEntity.id,
+                        registerNumber = userEntity.registerNumber,
+                        expiresInSeconds = expiresIn
+                    )
+                    
+                    try {
+                        val loginEvent = LoginEventEntity(
+                            id = UUID.randomUUID().toString(),
+                            userId = userEntity.id,
+                            registerNumber = userEntity.registerNumber,
+                            userName = userEntity.name.ifEmpty { "Student ${userEntity.registerNumber}" },
+                            loginAt = System.currentTimeMillis(),
+                            loginStatus = "SUCCESS",
+                            deviceType = "Android",
+                            appVersion = "1.0.0",
+                            sessionId = accessToken
+                        )
+                        loginEventDao.insertLoginEvent(loginEvent)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to record login event: ${e.message}")
+                    }
+
+                    return@withContext Result.success(LoginStep.Authenticated(userEntity.toDomain()))
+                } else {
+                    // OTP required, do NOT save session fully
+                    return@withContext Result.success(
+                        LoginStep.OtpRequired(
+                            EmailOtpChallenge(
+                                userId = userEntity.id,
+                                registerNumber = userEntity.registerNumber,
+                                maskedEmail = otpBody.emailMasked ?: "your registered email",
+                                expiresInSeconds = otpBody.expiresInSeconds,
+                                accessToken = accessToken,
+                                refreshToken = refreshToken
+                            )
+                        )
+                    )
+                }
+            } else {
+                // If edge function isn't found, 404, or fails
+                return@withContext Result.failure(IllegalStateException("Failed to request email OTP: ${otpResponse.code()}"))
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to record login event: ${e.message}")
+            return@withContext Result.failure(IllegalStateException("Network error requesting email OTP"))
+        }
+    }
+
+    suspend fun verifyEmailOtp(challenge: EmailOtpChallenge, otpCode: String): Result<User> = withContext(dispatcher) {
+        val cleanOtp = otpCode.trim()
+        if (cleanOtp.length != 6 || !cleanOtp.all { it.isDigit() }) {
+            return@withContext Result.failure(IllegalArgumentException("Invalid OTP. Please enter a 6-digit code."))
         }
 
-        Result.success(userEntity.toDomain())
+        try {
+            val verifyRes = authApi.verifyLoginOtp(
+                "Bearer ${challenge.accessToken}",
+                mapOf("otp" to cleanOtp)
+            )
+            
+            if (verifyRes.isSuccessful && verifyRes.body()?.ok == true) {
+                // Verified successfully
+                val userEntity = userDao.getUserById(challenge.userId)
+                    ?: return@withContext Result.failure(IllegalStateException("User profile not found"))
+
+                _currentProcessUserId.value = userEntity.id
+                
+                sessionManager.saveSession(
+                    accessToken = challenge.accessToken,
+                    refreshToken = challenge.refreshToken,
+                    userId = userEntity.id,
+                    registerNumber = userEntity.registerNumber,
+                    expiresInSeconds = challenge.expiresInSeconds.toLong()
+                )
+
+                try {
+                    val loginEvent = LoginEventEntity(
+                        id = UUID.randomUUID().toString(),
+                        userId = userEntity.id,
+                        registerNumber = userEntity.registerNumber,
+                        userName = userEntity.name.ifEmpty { "Student ${userEntity.registerNumber}" },
+                        loginAt = System.currentTimeMillis(),
+                        loginStatus = "SUCCESS",
+                        deviceType = "Android",
+                        appVersion = "1.0.0",
+                        sessionId = challenge.accessToken
+                    )
+                    loginEventDao.insertLoginEvent(loginEvent)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to record login event: ${e.message}")
+                }
+
+                return@withContext Result.success(userEntity.toDomain())
+            } else {
+                val errorMsg = verifyRes.body()?.error ?: "Invalid OTP"
+                return@withContext Result.failure(IllegalArgumentException(errorMsg))
+            }
+        } catch (e: Exception) {
+            return@withContext Result.failure(IllegalStateException("Network error during OTP verification"))
+        }
     }
 
     /**

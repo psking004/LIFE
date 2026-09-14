@@ -40,3 +40,18 @@ data class SupabaseAuthTokenResponse(
     @param:Json(name = "error_code") val errorCode: String? = null,
     @param:Json(name = "msg") val msg: String? = null
 )
+
+@JsonClass(generateAdapter = true)
+data class SendLoginOtpResponse(
+    @param:Json(name = "ok") val ok: Boolean = false,
+    @param:Json(name = "alreadyVerifiedToday") val alreadyVerifiedToday: Boolean = false,
+    @param:Json(name = "expiresInSeconds") val expiresInSeconds: Int = 300,
+    @param:Json(name = "emailMasked") val emailMasked: String? = null,
+    @param:Json(name = "error") val error: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class VerifyLoginOtpResponse(
+    @param:Json(name = "ok") val ok: Boolean = false,
+    @param:Json(name = "error") val error: String? = null
+)

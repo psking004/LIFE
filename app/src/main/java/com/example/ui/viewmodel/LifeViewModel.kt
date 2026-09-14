@@ -6,7 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.local.AppDatabase
 import com.example.data.repository.AuthSessionManager
 import com.example.data.repository.LifeRepository
-import com.example.data.repository.OtpChallenge
+import com.example.data.repository.EmailOtpChallenge
+import com.example.data.repository.LoginStep
 import com.example.domain.engine.TreeEngine
 import com.example.domain.model.IdeaNode
 import com.example.domain.model.LeaderboardRow
@@ -140,8 +141,8 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
     val isLoggingIn: StateFlow<Boolean> = _isLoggingIn.asStateFlow()
 
     // OTP Challenge State
-    private val _activeOtpChallenge = MutableStateFlow<OtpChallenge?>(null)
-    val activeOtpChallenge: StateFlow<OtpChallenge?> = _activeOtpChallenge.asStateFlow()
+    private val _activeOtpChallenge = MutableStateFlow<EmailOtpChallenge?>(null)
+    val activeOtpChallenge: StateFlow<EmailOtpChallenge?> = _activeOtpChallenge.asStateFlow()
 
     fun clearLoginError() {
         _loginError.value = null
@@ -177,8 +178,9 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Direct password-based login (OTP step temporarily disabled).
-     * Authenticates via real backend and navigates straight to LIFE upon ACTIVE status.
+     * Direct password-based login.
+     * Authenticates via real backend and navigates to LIFE upon ACTIVE status,
+     * or triggers email OTP verification.
      */
     fun login(registerNumber: String, password: String, onFirstLoginNeeded: (User) -> Unit = {}) {
         viewModelScope.launch {
@@ -186,12 +188,19 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
             _loginError.value = null
             val result = repository.login(registerNumber, password)
             _isLoggingIn.value = false
-            result.onSuccess { user ->
-                _activeOtpChallenge.value = null
+            result.onSuccess { step ->
                 _loginError.value = null
-                _uiMessages.emit(UiMessage("Welcome back, ${user.name.ifEmpty { user.registerNumber }}!"))
-                if (user.isFirstLogin) {
-                    onFirstLoginNeeded(user)
+                when (step) {
+                    is com.example.data.repository.LoginStep.Authenticated -> {
+                        _activeOtpChallenge.value = null
+                        _uiMessages.emit(UiMessage("Welcome back, ${step.user.name.ifEmpty { step.user.registerNumber }}!"))
+                        if (step.user.isFirstLogin) {
+                            onFirstLoginNeeded(step.user)
+                        }
+                    }
+                    is com.example.data.repository.LoginStep.OtpRequired -> {
+                        _activeOtpChallenge.value = step.challenge
+                    }
                 }
             }.onFailure { e ->
                 val errorMsg = e.message ?: "Authentication failed"
@@ -211,10 +220,7 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
             _loginError.value = null
             val result = repository.requestLoginOtp(registerNumber, password)
             _isLoggingIn.value = false
-            result.onSuccess { challenge ->
-                _loginError.value = null
-                _activeOtpChallenge.value = challenge
-            }.onFailure { e ->
+            result.onFailure { e ->
                 val errorMsg = e.message ?: "Authentication failed"
                 _loginError.value = errorMsg
                 _uiMessages.emit(UiMessage(errorMsg, isError = true))
@@ -230,7 +236,7 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isLoggingIn.value = true
             _loginError.value = null
-            val result = repository.verifyOtp(challenge, otpCode)
+            val result = repository.verifyEmailOtp(challenge, otpCode)
             _isLoggingIn.value = false
             result.onSuccess { user ->
                 _activeOtpChallenge.value = null
@@ -254,7 +260,7 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
         val challenge = _activeOtpChallenge.value ?: return
         viewModelScope.launch {
             _loginError.value = null
-            _uiMessages.emit(UiMessage("Verification code resent to ${challenge.maskedPhoneNumber}"))
+            _uiMessages.emit(UiMessage("Verification code resent to ${challenge.maskedEmail}"))
         }
     }
 

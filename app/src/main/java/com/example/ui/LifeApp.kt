@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.data.repository.EmailOtpChallenge
 import com.example.domain.model.IdeaNode
 import com.example.domain.model.NodeType
 import com.example.domain.model.User
@@ -106,7 +107,7 @@ fun LifeApp(
             val challenge = activeOtpChallenge
             if (challenge != null) {
                 OtpScreen(
-                    maskedPhone = challenge.maskedPhoneNumber,
+                    maskedEmail = challenge.maskedEmail,
                     onVerifyOtp = { otpCode ->
                         viewModel.verifyLoginOtp(otpCode, onFirstLoginNeeded = { u ->
                             firstLoginUser = u

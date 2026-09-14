@@ -36,6 +36,8 @@ class SupabaseSyncManager(
                         UserEntity(
                             id = dto.id,
                             registerNumber = dto.registerNumber,
+                            email = dto.email,
+                            emailVerified = dto.emailVerified,
                             passwordHash = dto.passwordHash,
                             isFirstLogin = dto.isFirstLogin,
                             isSuspended = dto.isSuspended,

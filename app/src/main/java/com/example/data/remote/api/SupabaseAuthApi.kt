@@ -72,4 +72,15 @@ interface SupabaseAuthApi {
     suspend fun verifyOtp(
         @Body request: Map<String, @JvmSuppressWildcards Any>
     ): Response<SupabaseAuthTokenResponse>
+
+    @POST("functions/v1/send-login-otp")
+    suspend fun sendLoginOtp(
+        @Header("Authorization") bearerToken: String
+    ): Response<com.example.data.remote.dto.SendLoginOtpResponse>
+
+    @POST("functions/v1/verify-login-otp")
+    suspend fun verifyLoginOtp(
+        @Header("Authorization") bearerToken: String,
+        @Body request: Map<String, String>
+    ): Response<com.example.data.remote.dto.VerifyLoginOtpResponse>
 }

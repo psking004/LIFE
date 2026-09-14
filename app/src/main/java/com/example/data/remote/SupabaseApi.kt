@@ -14,6 +14,8 @@ import retrofit2.http.Query
 data class SupabaseUserDto(
     @Json(name = "id") val id: String,
     @Json(name = "register_number") val registerNumber: String,
+    @Json(name = "email") val email: String = "",
+    @Json(name = "email_verified") val emailVerified: Boolean = false,
     @Json(name = "password_hash") val passwordHash: String = "student123",
     @Json(name = "is_first_login") val isFirstLogin: Boolean = false,
     @Json(name = "is_suspended") val isSuspended: Boolean = false,

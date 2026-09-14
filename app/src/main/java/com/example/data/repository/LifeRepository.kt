@@ -83,8 +83,12 @@ class LifeRepository(
         return authRepository.verifyOtp(challenge, otpCode)
     }
 
-    suspend fun login(registerNumber: String, password: String): Result<User> {
+    suspend fun login(registerNumber: String, password: String): Result<LoginStep> {
         return authRepository.login(registerNumber, password)
+    }
+
+    suspend fun verifyEmailOtp(challenge: EmailOtpChallenge, otpCode: String): Result<User> {
+        return authRepository.verifyEmailOtp(challenge, otpCode)
     }
 
     suspend fun setupFirstLoginPassword(userId: String, newPassword: String): Result<Unit> {

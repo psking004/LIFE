@@ -62,7 +62,7 @@ import kotlinx.coroutines.delay
 
 @Composable
 fun OtpScreen(
-    maskedPhone: String,
+    maskedEmail: String,
     onVerifyOtp: (String) -> Unit,
     onResendOtp: () -> Unit,
     onBack: () -> Unit,
@@ -172,7 +172,7 @@ fun OtpScreen(
                     Spacer(modifier = Modifier.height(16.dp))
 
                     Text(
-                        text = "Verify your identity",
+                        text = "Verify your email",
                         style = MaterialTheme.typography.titleLarge.copy(
                             fontWeight = FontWeight.Bold,
                             fontSize = 20.sp
@@ -183,7 +183,7 @@ fun OtpScreen(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     Text(
-                        text = "We sent a verification code to your registered mobile number",
+                        text = "Enter the 6-digit verification code sent to your registered email.",
                         style = MaterialTheme.typography.bodySmall.copy(
                             fontSize = 13.sp
                         ),
@@ -194,7 +194,7 @@ fun OtpScreen(
                     Spacer(modifier = Modifier.height(4.dp))
 
                     Text(
-                        text = maskedPhone,
+                        text = maskedEmail,
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp
