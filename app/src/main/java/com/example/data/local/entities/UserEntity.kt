@@ -10,7 +10,7 @@ data class UserEntity(
     @PrimaryKey val id: String,
     val authUserId: String? = null,
     val registerNumber: String,
-    val passwordHash: String,
+    val passwordHash: String = "",
     val name: String = "",
     val phoneNumber: String = "",
     val department: String = "Computer Science & Engineering",

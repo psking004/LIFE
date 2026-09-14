@@ -1,0 +1,20 @@
+# Supabase configuration for project LIFE (khjkbfkfucsdheeyvcar)
+project_id = "khjkbfkfucsdheeyvcar"
+
+[api]
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[functions.resolve-login-identity]
+verify_jwt = false
+
+[functions.send-login-otp]
+verify_jwt = false
+
+[functions.verify-login-otp]
+verify_jwt = false
+
+[functions.admin-manage-user]
+verify_jwt = false

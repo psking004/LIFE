@@ -55,3 +55,25 @@ data class VerifyLoginOtpResponse(
     @param:Json(name = "ok") val ok: Boolean = false,
     @param:Json(name = "error") val error: String? = null
 )
+
+@JsonClass(generateAdapter = true)
+data class ResolveLoginIdentityResponse(
+    @param:Json(name = "ok") val ok: Boolean = false,
+    @param:Json(name = "status") val status: String? = null,
+    @param:Json(name = "user_id") val userId: String? = null,
+    @param:Json(name = "register_number") val registerNumber: String? = null,
+    @param:Json(name = "auth_email") val authEmail: String? = null,
+    @param:Json(name = "masked_email") val maskedEmail: String? = null,
+    @param:Json(name = "already_verified_today") val alreadyVerifiedToday: Boolean = false,
+    @param:Json(name = "is_admin") val isAdmin: Boolean = false,
+    @param:Json(name = "error") val error: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminManageUserResponse(
+    @param:Json(name = "ok") val ok: Boolean = false,
+    @param:Json(name = "user_id") val userId: String? = null,
+    @param:Json(name = "register_number") val registerNumber: String? = null,
+    @param:Json(name = "error") val error: String? = null
+)
+

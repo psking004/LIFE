@@ -83,4 +83,21 @@ interface SupabaseAuthApi {
         @Header("Authorization") bearerToken: String,
         @Body request: Map<String, String>
     ): Response<com.example.data.remote.dto.VerifyLoginOtpResponse>
+
+    @POST("rest/v1/rpc/resolve_login_identity")
+    suspend fun resolveLoginIdentityRpc(
+        @Body request: Map<String, String>
+    ): Response<com.example.data.remote.dto.ResolveLoginIdentityResponse>
+
+    @POST("functions/v1/resolve-login-identity")
+    suspend fun resolveLoginIdentityFunction(
+        @Body request: Map<String, String>
+    ): Response<com.example.data.remote.dto.ResolveLoginIdentityResponse>
+
+    @POST("functions/v1/admin-manage-user")
+    suspend fun adminManageUser(
+        @Header("Authorization") bearerToken: String,
+        @Body request: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<com.example.data.remote.dto.AdminManageUserResponse>
 }
+

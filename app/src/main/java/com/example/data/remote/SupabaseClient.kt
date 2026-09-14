@@ -26,7 +26,12 @@ object SupabaseClient {
 
     val supabaseUrl: String by lazy {
         try {
-            BuildConfig.SUPABASE_URL.ifEmpty { "https://khjkbfkfucsdheeyvcar.supabase.co" }
+            val url = BuildConfig.SUPABASE_URL
+            if (url.isNullOrBlank() || url.contains("your-project") || url.startsWith("https://your-")) {
+                "https://khjkbfkfucsdheeyvcar.supabase.co"
+            } else {
+                url
+            }
         } catch (e: Exception) {
             "https://khjkbfkfucsdheeyvcar.supabase.co"
         }
@@ -34,8 +39,11 @@ object SupabaseClient {
 
     val supabaseAnonKey: String by lazy {
         try {
-            BuildConfig.SUPABASE_ANON_KEY.ifEmpty {
+            val key = BuildConfig.SUPABASE_ANON_KEY
+            if (key.isNullOrBlank() || key.contains("your_supabase_anon_key") || key.startsWith("your_")) {
                 "REDACTED"
+            } else {
+                key
             }
         } catch (e: Exception) {
             "REDACTED"
@@ -44,21 +52,43 @@ object SupabaseClient {
 
     private val authInterceptor = Interceptor { chain ->
         val original = chain.request()
-        val userToken = currentAccessToken.get()
-        val bearerToken = if (!userToken.isNullOrBlank()) userToken else supabaseAnonKey
-        
-        val requestBuilder = original.newBuilder()
-            .header("apikey", supabaseAnonKey)
-            .header("Authorization", "Bearer $bearerToken")
-            .header("Content-Type", "application/json")
-            .header("Prefer", "return=representation")
-        chain.proceed(requestBuilder.build())
+        val path = original.url.encodedPath
+        val builder = original.newBuilder()
+
+        // Always inject the public API key header
+        builder.header("apikey", supabaseAnonKey)
+
+        // Only inject Authorization if the request does NOT already have an Authorization header
+        val existingAuth = original.header("Authorization")
+        if (existingAuth.isNullOrBlank()) {
+            val userToken = currentAccessToken.get()
+            if (!userToken.isNullOrBlank()) {
+                builder.header("Authorization", "Bearer $userToken")
+            } else if (!path.contains("/auth/v1/")) {
+                // For PostgREST and public RPCs, provide anon Bearer token
+                builder.header("Authorization", "Bearer $supabaseAnonKey")
+            }
+        }
+
+        if (original.header("Content-Type") == null) {
+            builder.header("Content-Type", "application/json")
+        }
+        if (original.header("Prefer") == null && path.contains("/rest/v1/")) {
+            builder.header("Prefer", "return=representation")
+        }
+
+        chain.proceed(builder.build())
     }
 
     private val loggingInterceptor = HttpLoggingInterceptor { message ->
-        Log.d(TAG, message)
+        // Sanitize sensitive tokens, keys, passwords and OTPs from logcat
+        if (!message.contains("Bearer ") && !message.contains("password") && !message.contains("otp")) {
+            Log.d(TAG, message)
+        }
     }.apply {
-        level = HttpLoggingInterceptor.Level.BASIC
+        redactHeader("Authorization")
+        redactHeader("apikey")
+        level = if (BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC else HttpLoggingInterceptor.Level.NONE
     }
 
     val okHttpClient: OkHttpClient by lazy {

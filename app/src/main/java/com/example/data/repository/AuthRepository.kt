@@ -41,6 +41,16 @@ data class EmailOtpChallenge(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+data class ResolvedIdentity(
+    val userId: String,
+    val registerNumber: String,
+    val authEmail: String,
+    val maskedEmail: String,
+    val alreadyVerifiedToday: Boolean,
+    val status: String,
+    val isAdmin: Boolean
+)
+
 sealed class LoginStep {
     data class Authenticated(val user: User) : LoginStep()
     data class OtpRequired(val challenge: EmailOtpChallenge) : LoginStep()
@@ -68,8 +78,16 @@ class AuthRepository(
             return raw.trim().uppercase()
         }
 
-        fun mapToAuthEmail(normalizedReg: String): String {
-            return "${normalizedReg.trim().lowercase()}@life.edu"
+        fun maskEmail(email: String): String {
+            val atIdx = email.indexOf('@')
+            if (atIdx <= 1) return "your registered email"
+            val local = email.substring(0, atIdx)
+            val domain = email.substring(atIdx)
+            return if (local.length <= 2) {
+                "${local.first()}***$domain"
+            } else {
+                "${local.first()}***${local.last()}$domain"
+            }
         }
 
         fun maskPhoneNumber(raw: String): String {
@@ -201,22 +219,21 @@ class AuthRepository(
         Log.d("LIFE_AUTH", "LOGIN_STARTED")
         Log.i(TAG, "Step 1: Account status lookup for $normalizedReg")
 
-        // 1. Account Check
-        val userEntity = userDao.getUserByRegisterNumber(normalizedReg)
-        if (userEntity == null) {
-            return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
+        // 1. Account Check & Identity Resolution
+        val identityRes = resolveIdentity(normalizedReg)
+        if (identityRes.isFailure) {
+            return@withContext Result.failure(
+                identityRes.exceptionOrNull() ?: IllegalArgumentException("Invalid Register Number or Password")
+            )
         }
+        val identity = identityRes.getOrThrow()
+        val userEntity = userDao.getUserByRegisterNumber(normalizedReg)
+            ?: return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
 
         val domainUser = userEntity.toDomain()
-        when (domainUser.accountStatus) {
-            AccountStatus.PENDING -> return@withContext Result.failure(IllegalStateException("Your account is awaiting administrator approval."))
-            AccountStatus.SUSPENDED -> return@withContext Result.failure(IllegalStateException("Your account has been suspended. Contact the administrator."))
-            AccountStatus.REJECTED -> return@withContext Result.failure(IllegalStateException("Your account is not authorized."))
-            AccountStatus.ACTIVE -> { /* Proceed */ }
-        }
 
         // 2. Password Verification via Supabase
-        val authEmail = mapToAuthEmail(normalizedReg)
+        val authEmail = identity.authEmail
         var accessToken = ""
         
         try {
@@ -356,20 +373,122 @@ class AuthRepository(
     }
 
     /**
-     * Direct password-based login (OTP step temporarily disabled).
+     * Resolves the authoritative Supabase Auth email and verification state for the Register Number.
+     * Attempts server-side RPC / Edge Function first, and falls back to local database record.
+     */
+    suspend fun resolveIdentity(normalizedReg: String): Result<ResolvedIdentity> = withContext(dispatcher) {
+        // 1. Check local database record first if available
+        val localUser = userDao.getUserByRegisterNumber(normalizedReg)
+        if (localUser != null) {
+            when (localUser.accountStatus) {
+                AccountStatus.PENDING.name -> return@withContext Result.failure(IllegalStateException("Your account is awaiting administrator approval."))
+                AccountStatus.SUSPENDED.name -> return@withContext Result.failure(IllegalStateException("Your account has been suspended. Contact the administrator."))
+                AccountStatus.REJECTED.name -> return@withContext Result.failure(IllegalStateException("Your account is not authorized."))
+            }
+            if (localUser.isSuspended) {
+                return@withContext Result.failure(IllegalStateException("Your account has been suspended. Contact the administrator."))
+            }
+        }
+
+        // 2. Attempt server-side RPC
+        try {
+            val rpcResp = authApi.resolveLoginIdentityRpc(mapOf("p_register_number" to normalizedReg))
+            if (rpcResp.isSuccessful && rpcResp.body()?.ok == true) {
+                val b = rpcResp.body()!!
+                if (b.status in listOf("PENDING", "SUSPENDED", "REJECTED")) {
+                    val errMsg = when (b.status) {
+                        "PENDING" -> "Your account is awaiting administrator approval."
+                        "SUSPENDED" -> "Your account has been suspended. Contact the administrator."
+                        else -> "Your account is not authorized."
+                    }
+                    return@withContext Result.failure(IllegalStateException(errMsg))
+                }
+                return@withContext Result.success(
+                    ResolvedIdentity(
+                        userId = b.userId ?: (localUser?.id ?: "user_${normalizedReg.lowercase()}"),
+                        registerNumber = b.registerNumber ?: normalizedReg,
+                        authEmail = b.authEmail ?: (localUser?.email?.ifEmpty { "${normalizedReg.lowercase()}@campus.edu" } ?: "${normalizedReg.lowercase()}@campus.edu"),
+                        maskedEmail = b.maskedEmail ?: maskEmail(b.authEmail ?: ""),
+                        alreadyVerifiedToday = b.alreadyVerifiedToday,
+                        status = b.status ?: "ACTIVE",
+                        isAdmin = b.isAdmin
+                    )
+                )
+            } else if (rpcResp.code() == 403 || rpcResp.body()?.status in listOf("PENDING", "SUSPENDED", "REJECTED")) {
+                val err = rpcResp.body()?.error ?: "Account is not active."
+                return@withContext Result.failure(IllegalStateException(err))
+            }
+        } catch (ignored: Exception) {
+            // RPC not deployed or network down, try Edge Function
+        }
+
+        // 3. Attempt Edge Function
+        try {
+            val fnResp = authApi.resolveLoginIdentityFunction(mapOf("register_number" to normalizedReg))
+            if (fnResp.isSuccessful && fnResp.body()?.ok == true) {
+                val b = fnResp.body()!!
+                if (b.status in listOf("PENDING", "SUSPENDED", "REJECTED")) {
+                    val errMsg = when (b.status) {
+                        "PENDING" -> "Your account is awaiting administrator approval."
+                        "SUSPENDED" -> "Your account has been suspended. Contact the administrator."
+                        else -> "Your account is not authorized."
+                    }
+                    return@withContext Result.failure(IllegalStateException(errMsg))
+                }
+                return@withContext Result.success(
+                    ResolvedIdentity(
+                        userId = b.userId ?: (localUser?.id ?: "user_${normalizedReg.lowercase()}"),
+                        registerNumber = b.registerNumber ?: normalizedReg,
+                        authEmail = b.authEmail ?: (localUser?.email?.ifEmpty { "${normalizedReg.lowercase()}@campus.edu" } ?: "${normalizedReg.lowercase()}@campus.edu"),
+                        maskedEmail = b.maskedEmail ?: maskEmail(b.authEmail ?: ""),
+                        alreadyVerifiedToday = b.alreadyVerifiedToday,
+                        status = b.status ?: "ACTIVE",
+                        isAdmin = b.isAdmin
+                    )
+                )
+            } else if (fnResp.code() == 403 || fnResp.body()?.status in listOf("PENDING", "SUSPENDED", "REJECTED")) {
+                val err = fnResp.body()?.error ?: "Account is not active."
+                return@withContext Result.failure(IllegalStateException(err))
+            }
+        } catch (ignored: Exception) {
+            // Edge function not reachable, proceed with local Room
+        }
+
+        // 4. Fallback to local Room database
+        if (localUser == null) {
+            return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
+        }
+
+        val authEmail = if (localUser.email.isNotBlank()) localUser.email else "${localUser.registerNumber.lowercase()}@campus.edu"
+        Result.success(
+            ResolvedIdentity(
+                userId = localUser.id,
+                registerNumber = localUser.registerNumber,
+                authEmail = authEmail,
+                maskedEmail = maskEmail(authEmail),
+                alreadyVerifiedToday = false,
+                status = localUser.accountStatus,
+                isAdmin = localUser.isAdmin
+            )
+        )
+    }
+
+    /**
+     * Direct password-based login with daily OTP verification.
      *
      * Flow:
      * 1. Register Number + Password validation
-     * 2. Verify account exists in local database (Admin created/authorized accounts only; no self-registration)
-     * 3. Check AccountStatus:
+     * 2. Authoritative identity resolution & AccountStatus verification:
      *    - PENDING -> blocked
      *    - SUSPENDED -> blocked
      *    - REJECTED -> blocked
      *    - ACTIVE -> allowed
-     * 4. Real password verification using configured Supabase Auth backend (signInWithPassword)
-     * 5. Capture real Supabase accessToken, refreshToken, and authUserId
-     * 6. Establish in-memory process session and persist tokens
-     * 7. Record SUCCESS LoginEvent in audit trail
+     * 3. Password verification using configured Supabase Auth backend (signInWithPassword)
+     * 4. Capture real Supabase accessToken, refreshToken, and authUserId
+     * 5. Check daily OTP state via Edge Function (send-login-otp):
+     *    - If alreadyVerifiedToday -> establish session & return LoginStep.Authenticated
+     *    - If not verified -> send OTP to registered email & return LoginStep.OtpRequired
+     * 6. Record SUCCESS LoginEvent in audit trail
      */
     suspend fun login(registerNumber: String, password: String): Result<LoginStep> = withContext(dispatcher) {
         val normalizedReg = normalizeRegisterNumber(registerNumber)
@@ -380,49 +499,33 @@ class AuthRepository(
             return@withContext Result.failure(IllegalArgumentException("Please enter your password"))
         }
 
-        Log.d("LIFE_AUTH", "DIRECT_LOGIN_STARTED for $normalizedReg")
+        Log.d("LIFE_AUTH", "LOGIN_STARTED for $normalizedReg")
 
-        // 1. Verify account exists in local database (Admin-created/authorized accounts only)
-        val userEntity = userDao.getUserByRegisterNumber(normalizedReg)
-            ?: return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
-
-        val domainUser = userEntity.toDomain()
-
-        // 2. Verify account status
-        when (domainUser.accountStatus) {
-            AccountStatus.PENDING -> return@withContext Result.failure(IllegalStateException("Your account is awaiting administrator approval."))
-            AccountStatus.SUSPENDED -> return@withContext Result.failure(IllegalStateException("Your account has been suspended. Contact the administrator."))
-            AccountStatus.REJECTED -> return@withContext Result.failure(IllegalStateException("Your account is not authorized."))
-            AccountStatus.ACTIVE -> {
-                if (domainUser.isSuspended) {
-                    return@withContext Result.failure(IllegalStateException("Your account has been suspended. Contact the administrator."))
-                }
-                // Proceed
-            }
+        // 1. Resolve Identity and verify status
+        val identityRes = resolveIdentity(normalizedReg)
+        if (identityRes.isFailure) {
+            return@withContext Result.failure(
+                identityRes.exceptionOrNull() ?: IllegalArgumentException("Invalid Register Number or Password")
+            )
         }
+        val identity = identityRes.getOrThrow()
 
-        // 3. Password Verification via configured real Supabase Auth backend
-        val authEmail = mapToAuthEmail(normalizedReg)
+        // 2. Password Verification via authoritative Supabase Auth backend
         val accessToken: String
         val refreshToken: String
         val expiresIn: Long
+        val supabaseUserId: String?
 
         try {
             val response = authApi.signInWithPassword(
-                mapOf("email" to authEmail, "password" to password.trim())
+                mapOf("email" to identity.authEmail, "password" to password.trim())
             )
             if (response.isSuccessful && response.body()?.accessToken != null) {
                 val body = response.body()!!
                 accessToken = body.accessToken!!
                 refreshToken = body.refreshToken ?: ""
                 expiresIn = body.expiresIn ?: 3600L
-                SupabaseClient.currentAccessToken.set(accessToken)
-
-                // Sync authUserId on local UserEntity from Supabase Auth user ID
-                val supabaseUserId = body.user?.id
-                if (supabaseUserId != null && userEntity.authUserId != supabaseUserId) {
-                    userDao.updateAuthUserId(userEntity.id, supabaseUserId)
-                }
+                supabaseUserId = body.user?.id
             } else {
                 return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
             }
@@ -430,48 +533,67 @@ class AuthRepository(
             return@withContext Result.failure(IllegalStateException("Network error connecting to authentication server"))
         }
 
-        // 4. Request Email OTP (Edge Function)
+        // 3. Ensure local user profile exists and sync authUserId
+        var localUser = userDao.getUserByRegisterNumber(normalizedReg)
+        if (localUser == null) {
+            val newEntity = UserEntity(
+                id = identity.userId.ifEmpty { "user_${normalizedReg.lowercase()}" },
+                authUserId = supabaseUserId,
+                registerNumber = normalizedReg,
+                email = identity.authEmail,
+                emailVerified = true,
+                accountStatus = AccountStatus.ACTIVE.name,
+                isFirstLogin = false,
+                isSuspended = false,
+                isAdmin = identity.isAdmin
+            )
+            userDao.insertUser(newEntity)
+            localUser = newEntity
+        } else if (supabaseUserId != null && localUser.authUserId != supabaseUserId) {
+            userDao.updateAuthUserId(localUser.id, supabaseUserId)
+            localUser = localUser.copy(authUserId = supabaseUserId)
+        }
+
+        // 4. Daily OTP Verification Check
+        if (identity.alreadyVerifiedToday) {
+            _currentProcessUserId.value = localUser.id
+            SupabaseClient.currentAccessToken.set(accessToken)
+            sessionManager.saveSession(
+                accessToken = accessToken,
+                refreshToken = refreshToken,
+                userId = localUser.id,
+                registerNumber = localUser.registerNumber,
+                expiresInSeconds = expiresIn
+            )
+            recordLoginEvent(localUser, "SUCCESS", accessToken)
+            return@withContext Result.success(LoginStep.Authenticated(localUser.toDomain()))
+        }
+
+        // Request Daily Login OTP from Supabase Edge Function
         try {
             val otpResponse = authApi.sendLoginOtp("Bearer $accessToken")
             if (otpResponse.isSuccessful && otpResponse.body() != null) {
                 val otpBody = otpResponse.body()!!
                 if (otpBody.alreadyVerifiedToday) {
-                    // Fully authenticated
-                    _currentProcessUserId.value = userEntity.id
+                    _currentProcessUserId.value = localUser.id
+                    SupabaseClient.currentAccessToken.set(accessToken)
                     sessionManager.saveSession(
                         accessToken = accessToken,
                         refreshToken = refreshToken,
-                        userId = userEntity.id,
-                        registerNumber = userEntity.registerNumber,
+                        userId = localUser.id,
+                        registerNumber = localUser.registerNumber,
                         expiresInSeconds = expiresIn
                     )
-                    
-                    try {
-                        val loginEvent = LoginEventEntity(
-                            id = UUID.randomUUID().toString(),
-                            userId = userEntity.id,
-                            registerNumber = userEntity.registerNumber,
-                            userName = userEntity.name.ifEmpty { "Student ${userEntity.registerNumber}" },
-                            loginAt = System.currentTimeMillis(),
-                            loginStatus = "SUCCESS",
-                            deviceType = "Android",
-                            appVersion = "1.0.0",
-                            sessionId = accessToken
-                        )
-                        loginEventDao.insertLoginEvent(loginEvent)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to record login event: ${e.message}")
-                    }
-
-                    return@withContext Result.success(LoginStep.Authenticated(userEntity.toDomain()))
+                    recordLoginEvent(localUser, "SUCCESS", accessToken)
+                    return@withContext Result.success(LoginStep.Authenticated(localUser.toDomain()))
                 } else {
-                    // OTP required, do NOT save session fully
+                    // Daily OTP required; do NOT save persistent session yet
                     return@withContext Result.success(
                         LoginStep.OtpRequired(
                             EmailOtpChallenge(
-                                userId = userEntity.id,
-                                registerNumber = userEntity.registerNumber,
-                                maskedEmail = otpBody.emailMasked ?: "your registered email",
+                                userId = localUser.id,
+                                registerNumber = localUser.registerNumber,
+                                maskedEmail = otpBody.emailMasked ?: identity.maskedEmail,
                                 expiresInSeconds = otpBody.expiresInSeconds,
                                 accessToken = accessToken,
                                 refreshToken = refreshToken
@@ -480,7 +602,6 @@ class AuthRepository(
                     )
                 }
             } else {
-                // If edge function isn't found, 404, or fails
                 return@withContext Result.failure(IllegalStateException("Failed to request email OTP: ${otpResponse.code()}"))
             }
         } catch (e: Exception) {
@@ -499,14 +620,15 @@ class AuthRepository(
                 "Bearer ${challenge.accessToken}",
                 mapOf("otp" to cleanOtp)
             )
-            
+
             if (verifyRes.isSuccessful && verifyRes.body()?.ok == true) {
                 // Verified successfully
                 val userEntity = userDao.getUserById(challenge.userId)
                     ?: return@withContext Result.failure(IllegalStateException("User profile not found"))
 
                 _currentProcessUserId.value = userEntity.id
-                
+                SupabaseClient.currentAccessToken.set(challenge.accessToken)
+
                 sessionManager.saveSession(
                     accessToken = challenge.accessToken,
                     refreshToken = challenge.refreshToken,
@@ -515,23 +637,7 @@ class AuthRepository(
                     expiresInSeconds = challenge.expiresInSeconds.toLong()
                 )
 
-                try {
-                    val loginEvent = LoginEventEntity(
-                        id = UUID.randomUUID().toString(),
-                        userId = userEntity.id,
-                        registerNumber = userEntity.registerNumber,
-                        userName = userEntity.name.ifEmpty { "Student ${userEntity.registerNumber}" },
-                        loginAt = System.currentTimeMillis(),
-                        loginStatus = "SUCCESS",
-                        deviceType = "Android",
-                        appVersion = "1.0.0",
-                        sessionId = challenge.accessToken
-                    )
-                    loginEventDao.insertLoginEvent(loginEvent)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to record login event: ${e.message}")
-                }
-
+                recordLoginEvent(userEntity, "SUCCESS", challenge.accessToken)
                 return@withContext Result.success(userEntity.toDomain())
             } else {
                 val errorMsg = verifyRes.body()?.error ?: "Invalid OTP"
@@ -539,6 +645,25 @@ class AuthRepository(
             }
         } catch (e: Exception) {
             return@withContext Result.failure(IllegalStateException("Network error during OTP verification"))
+        }
+    }
+
+    private suspend fun recordLoginEvent(user: UserEntity, status: String, sessionId: String) {
+        try {
+            val loginEvent = LoginEventEntity(
+                id = UUID.randomUUID().toString(),
+                userId = user.id,
+                registerNumber = user.registerNumber,
+                userName = user.name.ifEmpty { "Student ${user.registerNumber}" },
+                loginAt = System.currentTimeMillis(),
+                loginStatus = status,
+                deviceType = "Android",
+                appVersion = "1.0.0",
+                sessionId = sessionId
+            )
+            loginEventDao.insertLoginEvent(loginEvent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to record login event: ${e.message}")
         }
     }
 
@@ -583,7 +708,8 @@ class AuthRepository(
         registerNumber: String,
         phoneNumber: String,
         department: String,
-        initialPassword: String = "pass123"
+        initialPassword: String = "pass123",
+        email: String = ""
     ): Result<User> = withContext(dispatcher) {
         val admin = userDao.getUserById(adminUserId)
         if (admin == null || !admin.isAdmin) {
@@ -600,14 +726,43 @@ class AuthRepository(
             return@withContext Result.failure(IllegalArgumentException("Account with register number $normalizedReg already exists"))
         }
 
+        val studentEmail = email.trim().ifEmpty { "${normalizedReg.lowercase()}@campus.edu" }
+        var authUserId: String? = null
+        val adminToken = SupabaseClient.currentAccessToken.get()
+
+        if (!adminToken.isNullOrBlank()) {
+            try {
+                val resp = authApi.adminManageUser(
+                    "Bearer $adminToken",
+                    mapOf(
+                        "action" to "create_student",
+                        "register_number" to normalizedReg,
+                        "name" to name.trim(),
+                        "email" to studentEmail,
+                        "phone_number" to phoneNumber.trim(),
+                        "department" to department.trim(),
+                        "initial_password" to initialPassword.trim()
+                    )
+                )
+                if (resp.isSuccessful && resp.body()?.ok == true) {
+                    authUserId = resp.body()?.userId
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Edge function student creation skipped: ${e.message}")
+            }
+        }
+
         val userId = "user_" + normalizedReg.lowercase()
         val entity = UserEntity(
             id = userId,
+            authUserId = authUserId,
             registerNumber = normalizedReg,
-            passwordHash = initialPassword.trim(),
+            passwordHash = "",
             name = name.trim().ifEmpty { "Student $normalizedReg" },
             phoneNumber = phoneNumber.trim().ifEmpty { "9876541234" },
             department = department.trim().ifEmpty { "Computer Science & Engineering" },
+            email = studentEmail,
+            emailVerified = true,
             accountStatus = AccountStatus.PENDING.name,
             isFirstLogin = true,
             isSuspended = false,

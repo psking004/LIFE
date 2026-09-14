@@ -31,10 +31,10 @@ class AuthFlowTest {
         override suspend fun signInWithPassword(request: Map<String, String>): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthTokenResponse> {
             val email = request["email"] ?: ""
             val pwd = request["password"] ?: ""
-            if ((email == "23cse042@life.edu" && pwd == "student123") ||
-                (email == "23cse001@life.edu" && pwd == "pass123") ||
-                (email == "23cse099@life.edu" && pwd == "welcome") ||
-                (email == "admin01@life.edu" && pwd == "admin123")) {
+            if ((email.startsWith("23cse042@") && pwd == "student123") ||
+                (email.startsWith("23cse001@") && pwd == "pass123") ||
+                (email.startsWith("23cse099@") && pwd == "welcome") ||
+                (email.startsWith("admin01@") && pwd == "admin123")) {
                 return retrofit2.Response.success(com.example.data.remote.dto.SupabaseAuthTokenResponse(
                     accessToken = "mock_access_token",
                     user = com.example.data.remote.dto.SupabaseAuthUserDto(id = "mock_user_id")
@@ -65,6 +65,42 @@ class AuthFlowTest {
                 return retrofit2.Response.success(com.example.data.remote.dto.VerifyLoginOtpResponse(ok = true))
             }
             return retrofit2.Response.error(400, okhttp3.ResponseBody.create(null, ""))
+        }
+
+        override suspend fun resolveLoginIdentityRpc(request: Map<String, String>): retrofit2.Response<com.example.data.remote.dto.ResolveLoginIdentityResponse> {
+            val reg = request["p_register_number"] ?: ""
+            return retrofit2.Response.success(
+                com.example.data.remote.dto.ResolveLoginIdentityResponse(
+                    ok = true,
+                    userId = "user_${reg.lowercase()}",
+                    registerNumber = reg,
+                    authEmail = "${reg.lowercase()}@campus.edu",
+                    maskedEmail = "${reg.first()}***@campus.edu",
+                    alreadyVerifiedToday = true,
+                    status = "ACTIVE",
+                    isAdmin = reg.startsWith("ADMIN")
+                )
+            )
+        }
+
+        override suspend fun resolveLoginIdentityFunction(request: Map<String, String>): retrofit2.Response<com.example.data.remote.dto.ResolveLoginIdentityResponse> {
+            val reg = request["register_number"] ?: ""
+            return retrofit2.Response.success(
+                com.example.data.remote.dto.ResolveLoginIdentityResponse(
+                    ok = true,
+                    userId = "user_${reg.lowercase()}",
+                    registerNumber = reg,
+                    authEmail = "${reg.lowercase()}@campus.edu",
+                    maskedEmail = "${reg.first()}***@campus.edu",
+                    alreadyVerifiedToday = true,
+                    status = "ACTIVE",
+                    isAdmin = reg.startsWith("ADMIN")
+                )
+            )
+        }
+
+        override suspend fun adminManageUser(bearerToken: String, request: Map<String, Any?>): retrofit2.Response<com.example.data.remote.dto.AdminManageUserResponse> {
+            return retrofit2.Response.success(com.example.data.remote.dto.AdminManageUserResponse(ok = true, userId = "mock_admin_user_id"))
         }
 
         override suspend fun logout(bearerToken: String): retrofit2.Response<Unit> {
@@ -122,13 +158,13 @@ class AuthFlowTest {
     }
 
     @Test
-    fun `deterministic normalization and email mapping`() {
+    fun `deterministic normalization and email masking`() {
         val reg = " 23cse042 "
         val normalized = AuthRepository.normalizeRegisterNumber(reg)
         assertEquals("23CSE042", normalized)
 
-        val email = AuthRepository.mapToAuthEmail(normalized)
-        assertEquals("23cse042@life.edu", email)
+        val maskedEmail = AuthRepository.maskEmail("student@campus.edu")
+        assertEquals("s***t@campus.edu", maskedEmail)
 
         val masked = AuthRepository.maskPhoneNumber("9876543210")
         assertEquals("******3210", masked)
