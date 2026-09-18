@@ -10,6 +10,7 @@ data class UserEntity(
     @PrimaryKey val id: String,
     val authUserId: String? = null,
     val registerNumber: String,
+    // legacy compatibility: kept as blank by default. Do NOT use for authentication.
     val passwordHash: String = "",
     val name: String = "",
     val phoneNumber: String = "",

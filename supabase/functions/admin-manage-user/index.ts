@@ -1,10 +1,32 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.8";
+import { cert, getApps, initializeApp } from "npm:firebase-admin/app";
+import { getAuth } from "npm:firebase-admin/auth";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
+
+function ensureFirebaseAdmin() {
+  if (getApps().length === 0) {
+    const projectId = Deno.env.get("FIREBASE_PROJECT_ID") ?? "";
+    const clientEmail = Deno.env.get("FIREBASE_CLIENT_EMAIL") ?? "";
+    const privateKey = Deno.env.get("FIREBASE_PRIVATE_KEY") ?? "";
+
+    if (!projectId || !clientEmail || !privateKey) {
+      throw new Error("Missing Firebase admin configuration");
+    }
+
+    initializeApp({
+      credential: cert({
+        projectId,
+        clientEmail,
+        privateKey: privateKey.replace(/\\n/g, "\n"),
+      }),
+    });
+  }
+}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -28,32 +50,41 @@ serve(async (req) => {
     }
 
     const token = authHeader.replace("Bearer ", "").trim();
-    const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
-    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-
-    // 1. Authenticate caller using client JWT
-    const supabaseUserClient = createClient(supabaseUrl, supabaseAnonKey, {
-      global: { headers: { Authorization: `Bearer ${token}` } },
-    });
-
-    const { data: { user: callerAuth }, error: callerAuthError } = await supabaseUserClient.auth.getUser();
-    if (callerAuthError || !callerAuth) {
-      return new Response(JSON.stringify({ ok: false, error: "Invalid or expired session" }), {
+    if (!token) {
+      return new Response(JSON.stringify({ ok: false, error: "Missing Firebase ID token" }), {
         status: 401,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // 2. Authoritative Database Client
+    const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+
+    if (!supabaseUrl || !supabaseServiceKey) {
+      return new Response(JSON.stringify({ ok: false, error: "Missing Supabase configuration" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    ensureFirebaseAdmin();
+    const firebaseAuth = getAuth(getApps()[0]);
+    const decodedToken = await firebaseAuth.verifyIdToken(token);
+    const firebaseUid = decodedToken.uid;
+    if (!firebaseUid) {
+      return new Response(JSON.stringify({ ok: false, error: "Invalid Firebase token" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
 
-    // 3. Verify caller has ACTIVE admin privileges in public.users
     const { data: adminRecord, error: adminError } = await supabaseAdmin
       .from("users")
       .select("id, register_number, is_admin, account_status, is_suspended")
-      .eq("auth_user_id", callerAuth.id)
-      .single();
+      .eq("auth_user_id", firebaseUid)
+      .maybeSingle();
 
     if (adminError || !adminRecord || !adminRecord.is_admin || adminRecord.account_status !== "ACTIVE" || adminRecord.is_suspended) {
       return new Response(JSON.stringify({ ok: false, error: "Unauthorized: Administrator privileges required" }), {
@@ -63,7 +94,7 @@ serve(async (req) => {
     }
 
     const body = await req.json().catch(() => ({}));
-    const action = body.action; // 'create_student' | 'reset_password' | 'set_status'
+    const action = body.action;
 
     if (action === "create_student") {
       const registerNumber = (body.register_number ?? "").toString().trim().toUpperCase();
@@ -83,7 +114,21 @@ serve(async (req) => {
         });
       }
 
-      // Check if student already exists in public.users
+      if (!email.includes("@") || !email.includes(".")) {
+        return new Response(JSON.stringify({ ok: false, error: "Please provide a valid email address." }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const lowerEmail = email.toLowerCase();
+      if (lowerEmail.endsWith("@life.edu") || lowerEmail.endsWith("@campus.edu")) {
+        return new Response(JSON.stringify({ ok: false, error: "Use the student's real email address. Synthetic campus email addresses are not allowed." }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
       const { data: existingUser } = await supabaseAdmin
         .from("users")
         .select("id")
@@ -100,31 +145,16 @@ serve(async (req) => {
         });
       }
 
-      // Securely create Supabase Auth User via Admin API
-      const { data: authCreated, error: createAuthError } = await supabaseAdmin.auth.admin.createUser({
-        email: email,
+      const authCreated = await firebaseAuth.createUser({
+        email,
         password: initialPassword,
-        email_confirm: true,
-        user_metadata: {
-          register_number: registerNumber,
-          name: name,
-        },
+        emailVerified: true,
+        displayName: name || registerNumber,
       });
 
-      if (createAuthError || !authCreated?.user) {
-        return new Response(JSON.stringify({
-          ok: false,
-          error: `Failed to create auth identity: ${createAuthError?.message ?? "unknown error"}`,
-        }), {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
-      const authUserId = authCreated.user.id;
+      const authUserId = authCreated.uid;
       const studentId = `user_${registerNumber.toLowerCase()}`;
 
-      // Insert into public.users linked to auth_user_id
       const { error: insertUserError } = await supabaseAdmin
         .from("users")
         .insert({
@@ -132,20 +162,20 @@ serve(async (req) => {
           auth_user_id: authUserId,
           register_number: registerNumber,
           name: name || `Student ${registerNumber}`,
-          email: email,
+          email,
           phone_number: phone,
-          department: department,
-          account_status: "ACTIVE",
+          department,
+          account_status: "PENDING",
           is_first_login: true,
           is_suspended: false,
           is_admin: false,
-          approved_at: new Date().toISOString(),
-          approved_by: adminRecord.register_number,
+          created_at: new Date().toISOString(),
+          approved_at: null,
+          approved_by: null,
         });
 
       if (insertUserError) {
-        // Rollback created auth user
-        await supabaseAdmin.auth.admin.deleteUser(authUserId);
+        await firebaseAuth.deleteUser(authUserId);
         return new Response(JSON.stringify({
           ok: false,
           error: `Failed to save student profile: ${insertUserError.message}`,
@@ -192,16 +222,7 @@ serve(async (req) => {
         });
       }
 
-      const { error: resetError } = await supabaseAdmin.auth.admin.updateUserById(targetUser.auth_user_id, {
-        password: newPassword,
-      });
-
-      if (resetError) {
-        return new Response(JSON.stringify({ ok: false, error: resetError.message }), {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
+      await firebaseAuth.updateUser(targetUser.auth_user_id, { password: newPassword });
 
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
@@ -272,9 +293,9 @@ serve(async (req) => {
         .single();
 
       if (targetUser?.auth_user_id) {
-        await supabaseAdmin.auth.admin.updateUserById(targetUser.auth_user_id, {
+        await firebaseAuth.updateUser(targetUser.auth_user_id, {
           email: newEmail,
-          email_confirm: true,
+          emailVerified: true,
         });
       }
 

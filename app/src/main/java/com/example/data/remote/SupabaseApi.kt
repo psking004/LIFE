@@ -16,7 +16,7 @@ data class SupabaseUserDto(
     @Json(name = "register_number") val registerNumber: String,
     @Json(name = "email") val email: String = "",
     @Json(name = "email_verified") val emailVerified: Boolean = false,
-    @Json(name = "password_hash") val passwordHash: String = "student123",
+    // password_hash intentionally omitted: Firebase is the sole password authority
     @Json(name = "is_first_login") val isFirstLogin: Boolean = false,
     @Json(name = "is_suspended") val isSuspended: Boolean = false,
     @Json(name = "is_admin") val isAdmin: Boolean = false,

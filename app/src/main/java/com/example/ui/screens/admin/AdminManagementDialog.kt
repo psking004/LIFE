@@ -28,6 +28,10 @@ import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -69,7 +73,7 @@ import java.util.Locale
 fun AdminManagementDialog(
     users: List<User>,
     loginEvents: List<LoginEvent>,
-    onCreateStudent: (name: String, reg: String, phone: String, dept: String) -> Unit,
+    onCreateStudent: (name: String, reg: String, phone: String, dept: String, email: String, password: String) -> Unit,
     onApproveStudent: (userId: String) -> Unit,
     onRejectStudent: (userId: String) -> Unit,
     onSuspendStudent: (userId: String) -> Unit,
@@ -84,6 +88,9 @@ fun AdminManagementDialog(
     var newName by remember { mutableStateOf("") }
     var newRegNum by remember { mutableStateOf("") }
     var newPhone by remember { mutableStateOf("") }
+    var newPassword by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+    var newEmail by remember { mutableStateOf("") }
     var newDept by remember { mutableStateOf("Computer Science & Engineering") }
     var formError by remember { mutableStateOf<String?>(null) }
 
@@ -259,6 +266,35 @@ fun AdminManagementDialog(
                                 Spacer(modifier = Modifier.height(6.dp))
 
                                 OutlinedTextField(
+                                    value = newPassword,
+                                    onValueChange = { newPassword = it; formError = null },
+                                    label = { Text("Password") },
+                                    modifier = Modifier.fillMaxWidth().testTag("admin_new_password_input"),
+                                    singleLine = true,
+                                    trailingIcon = {
+                                        androidx.compose.material3.IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                            androidx.compose.material3.Icon(
+                                                imageVector = if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                                contentDescription = null
+                                            )
+                                        }
+                                    },
+                                    visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                OutlinedTextField(
+                                    value = newEmail,
+                                    onValueChange = { newEmail = it; formError = null },
+                                    label = { Text("Email") },
+                                    modifier = Modifier.fillMaxWidth().testTag("admin_new_email_input"),
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                OutlinedTextField(
                                     value = newDept,
                                     onValueChange = { newDept = it; formError = null },
                                     label = { Text("Department") },
@@ -279,14 +315,28 @@ fun AdminManagementDialog(
                                         val reg = newRegNum.trim().uppercase()
                                         val name = newName.trim()
                                         val phone = newPhone.trim()
+                                        val email = newEmail.trim()
                                         if (reg.isEmpty()) {
                                             formError = "Enter register number"
                                             return@Button
                                         }
-                                        onCreateStudent(name, reg, phone, newDept.trim())
+                                        if (email.isBlank()) {
+                                            formError = "Email is required"
+                                            return@Button
+                                        }
+                                        if (!android.util.Patterns.EMAIL_ADDRESS.matcher(email).matches()) {
+                                            formError = "Enter a valid email address"
+                                            return@Button
+                                        }
+                                        if (email.lowercase().endsWith("@life.edu") || email.lowercase().endsWith("@campus.edu")) {
+                                            formError = "Use the student's real email, not a synthetic campus address"
+                                            return@Button
+                                        }
+                                        onCreateStudent(name, reg, phone, newDept.trim(), email, newPassword)
                                         newName = ""
                                         newRegNum = ""
                                         newPhone = ""
+                                        newEmail = ""
                                         showAddForm = false
                                     },
                                     modifier = Modifier.fillMaxWidth().testTag("admin_submit_student_button"),

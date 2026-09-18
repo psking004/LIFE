@@ -1,8 +1,10 @@
 package com.example.ui.viewmodel
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.BuildConfig
 import com.example.data.local.AppDatabase
 import com.example.data.repository.AuthSessionManager
 import com.example.data.repository.LifeRepository
@@ -137,6 +139,9 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
     private val _loginError = MutableStateFlow<String?>(null)
     val loginError: StateFlow<String?> = _loginError.asStateFlow()
 
+    private val _accountNotFound = MutableStateFlow<String?>(null)
+    val accountNotFound: StateFlow<String?> = _accountNotFound.asStateFlow()
+
     private val _isLoggingIn = MutableStateFlow(false)
     val isLoggingIn: StateFlow<Boolean> = _isLoggingIn.asStateFlow()
 
@@ -146,6 +151,10 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearLoginError() {
         _loginError.value = null
+    }
+
+    fun clearAccountNotFound() {
+        _accountNotFound.value = null
     }
 
     fun clearOtpChallenge() {
@@ -203,7 +212,15 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }.onFailure { e ->
-                val errorMsg = e.message ?: "Authentication failed"
+                val reason = e.message ?: "Authentication failed"
+                val errorMsg = if (BuildConfig.DEBUG) reason else "Login failed"
+                if (BuildConfig.DEBUG) {
+                    Log.d("LIFE_AUTH_DIAGNOSTIC", "AUTH_INVALID_CREDENTIALS: ${reason.take(160)}")
+                }
+                // Special-case: account not found -> show dedicated screen
+                if (reason.contains("Account Not Found")) {
+                    _accountNotFound.value = registerNumber
+                }
                 _loginError.value = errorMsg
                 _uiMessages.emit(UiMessage(errorMsg, isError = true))
             }
@@ -276,6 +293,25 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun adminLogin(email: String, password: String, onSuccess: (User) -> Unit = {}) {
+        viewModelScope.launch {
+            _isLoggingIn.value = true
+            _loginError.value = null
+            val result = repository.adminLogin(email, password)
+            _isLoggingIn.value = false
+            result.onSuccess { user ->
+                _activeOtpChallenge.value = null
+                _loginError.value = null
+                _uiMessages.emit(UiMessage("Welcome back, ${user.name.ifEmpty { user.registerNumber }}!"))
+                onSuccess(user)
+            }.onFailure { e ->
+                val errorMsg = e.message ?: "Admin login failed"
+                _loginError.value = errorMsg
+                _uiMessages.emit(UiMessage(errorMsg, isError = true))
+            }
+        }
+    }
+
     fun logout() {
         viewModelScope.launch {
             repository.logout()
@@ -306,6 +342,33 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
                 onSuccess()
             }.onFailure { e ->
                 _uiMessages.emit(UiMessage(e.message ?: "Creation failed", isError = true))
+            }
+        }
+    }
+
+    /**
+     * Student self sign-up flow. Creates Firebase identity server-side and a PENDING LIFE user.
+     */
+    fun signUpStudent(
+        registerNumber: String,
+        password: String,
+        email: String,
+        phoneNumber: String,
+        name: String = "",
+        department: String = "Computer Science & Engineering",
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            _loginError.value = null
+            val result = repository.signUpStudent(registerNumber = registerNumber, password = password, email = email, phoneNumber = phoneNumber, name = name, department = department)
+            result.onSuccess {
+                _uiMessages.emit(UiMessage("Account created and pending administrator approval"))
+                onResult(true, "")
+            }.onFailure { e ->
+                val msg = e.message ?: "Unable to create account. Please try again."
+                _loginError.value = msg
+                _uiMessages.emit(UiMessage(msg, isError = true))
+                onResult(false, msg)
             }
         }
     }
@@ -371,7 +434,7 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- Admin Actions ---
 
-    fun createStudent(name: String, registerNumber: String, phoneNumber: String, department: String) {
+    fun createStudent(name: String, registerNumber: String, phoneNumber: String, department: String, email: String, initialPassword: String = "") {
         val admin = currentUser.value ?: return
         if (!admin.isAdmin) return
         viewModelScope.launch {
@@ -380,7 +443,9 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
                 name = name,
                 registerNumber = registerNumber,
                 phoneNumber = phoneNumber,
-                department = department
+                department = department,
+                email = email,
+                initialPassword = if (initialPassword.isBlank()) "pass123" else initialPassword
             )
             result.onSuccess {
                 _uiMessages.emit(UiMessage("Account for $registerNumber created (Pending Approval)"))

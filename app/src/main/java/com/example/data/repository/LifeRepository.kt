@@ -42,13 +42,12 @@ class LifeRepository(
 
     suspend fun initializeDatabase() = withContext(dispatcher) {
         // Ensure baseline demo and pilot users exist
-        for (user in SeedData.initialUsers) {
-            val existing = userDao.getUserByRegisterNumber(user.registerNumber)
-            if (existing == null) {
-                userDao.insertUser(user)
-            } else if (user.registerNumber in listOf("23CSE001", "23CSE002", "ADMIN01") && existing.passwordHash == "admin123" && user.passwordHash == "pass123") {
-                // Update demo student 1 password if previously seeded with admin123
-                userDao.updatePassword(existing.id, user.passwordHash)
+        if (com.example.BuildConfig.DEBUG) {
+            for (user in SeedData.initialUsers) {
+                val existing = userDao.getUserByRegisterNumber(user.registerNumber)
+                if (existing == null) {
+                    userDao.insertUser(user)
+                }
             }
         }
         val existingProb = nodeDao.getNodeById(SeedData.nodeProblem1Id)
@@ -93,6 +92,10 @@ class LifeRepository(
 
     suspend fun setupFirstLoginPassword(userId: String, newPassword: String): Result<Unit> {
         return authRepository.setupFirstLoginPassword(userId, newPassword)
+    }
+
+    suspend fun adminLogin(email: String, password: String): Result<User> {
+        return authRepository.adminLogin(email, password)
     }
 
     suspend fun logout() {
@@ -617,6 +620,7 @@ class LifeRepository(
         registerNumber: String,
         phoneNumber: String,
         department: String,
+        email: String,
         initialPassword: String = "pass123"
     ): Result<User> = withContext(dispatcher) {
         val result = authRepository.createStudentAccount(
@@ -625,7 +629,34 @@ class LifeRepository(
             registerNumber = registerNumber,
             phoneNumber = phoneNumber,
             department = department,
-            initialPassword = initialPassword
+            initialPassword = initialPassword,
+            email = email
+        )
+        result.onSuccess { user ->
+            val scoreEntity = UserScoreEntity(
+                userId = user.id,
+                registerNumber = user.registerNumber
+            )
+            scoreDao.insertUserScore(scoreEntity)
+        }
+        result
+    }
+
+    suspend fun signUpStudent(
+        registerNumber: String,
+        password: String,
+        email: String,
+        phoneNumber: String,
+        name: String = "",
+        department: String = "Computer Science & Engineering"
+    ): Result<User> = withContext(dispatcher) {
+        val result = authRepository.registerStudent(
+            registerNumber = registerNumber,
+            password = password,
+            email = email,
+            phoneNumber = phoneNumber,
+            name = name,
+            department = department
         )
         result.onSuccess { user ->
             val scoreEntity = UserScoreEntity(

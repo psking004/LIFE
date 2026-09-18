@@ -11,11 +11,6 @@ import retrofit2.http.PUT
 
 interface SupabaseAuthApi {
 
-    @POST("auth/v1/token?grant_type=password")
-    suspend fun signInWithPassword(
-        @Body request: Map<String, String>
-    ): Response<SupabaseAuthTokenResponse>
-
     @POST("auth/v1/signup")
     suspend fun signUp(
         @Body request: Map<String, @JvmSuppressWildcards Any>
@@ -42,37 +37,6 @@ interface SupabaseAuthApi {
         @Header("Authorization") bearerToken: String
     ): Response<Unit>
 
-    @POST("auth/v1/factors")
-    suspend fun enrollFactor(
-        @Header("Authorization") bearerToken: String,
-        @Body request: Map<String, String>
-    ): Response<com.example.data.remote.dto.SupabaseFactorDto>
-
-    @POST("auth/v1/factors/{factorId}/challenge")
-    suspend fun createChallenge(
-        @Header("Authorization") bearerToken: String,
-        @retrofit2.http.Path("factorId") factorId: String,
-        @Body request: Map<String, String> = emptyMap()
-    ): Response<com.example.data.remote.dto.SupabaseChallengeDto>
-
-    @POST("auth/v1/factors/{factorId}/verify")
-    suspend fun verifyFactor(
-        @Header("Authorization") bearerToken: String,
-        @retrofit2.http.Path("factorId") factorId: String,
-        @Body request: Map<String, String>
-    ): Response<SupabaseAuthTokenResponse>
-
-    // Legacy OTP - removing these as we switch to MFA factors
-    @POST("auth/v1/otp")
-    suspend fun sendOtp(
-        @Body request: Map<String, @JvmSuppressWildcards Any>
-    ): Response<Map<String, @JvmSuppressWildcards Any?>>
-
-    @POST("auth/v1/verify")
-    suspend fun verifyOtp(
-        @Body request: Map<String, @JvmSuppressWildcards Any>
-    ): Response<SupabaseAuthTokenResponse>
-
     @POST("functions/v1/send-login-otp")
     suspend fun sendLoginOtp(
         @Header("Authorization") bearerToken: String
@@ -98,6 +62,17 @@ interface SupabaseAuthApi {
     suspend fun adminManageUser(
         @Header("Authorization") bearerToken: String,
         @Body request: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<com.example.data.remote.dto.AdminManageUserResponse>
+
+    @POST("functions/v1/self-signup")
+    suspend fun selfSignUp(
+        @Body request: Map<String, @JvmSuppressWildcards Any?>
+    ): Response<com.example.data.remote.dto.AdminManageUserResponse>
+
+    @POST("functions/v1/complete-first-login")
+    suspend fun completeFirstLogin(
+        @Header("Authorization") bearerToken: String,
+        @Body request: Map<String, @JvmSuppressWildcards Any?> = emptyMap()
     ): Response<com.example.data.remote.dto.AdminManageUserResponse>
 }
 

@@ -1,10 +1,42 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.8";
+import { cert, getApps, initializeApp } from "npm:firebase-admin/app";
+import { getAuth } from "npm:firebase-admin/auth";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
+
+function maskEmail(email: string): string {
+  const trimmed = (email || "").trim();
+  if (!trimmed || !trimmed.includes("@")) return "your registered email";
+  const atIndex = trimmed.indexOf("@");
+  const local = trimmed.slice(0, atIndex);
+  const domain = trimmed.slice(atIndex);
+  if (local.length <= 2) return `${local[0] || ""}***${domain}`;
+  return `${local[0]}***${local[local.length - 1]}${domain}`;
+}
+
+function ensureFirebaseAdmin() {
+  if (getApps().length === 0) {
+    const projectId = Deno.env.get("FIREBASE_PROJECT_ID") ?? "";
+    const clientEmail = Deno.env.get("FIREBASE_CLIENT_EMAIL") ?? "";
+    const privateKey = Deno.env.get("FIREBASE_PRIVATE_KEY") ?? "";
+
+    if (!projectId || !clientEmail || !privateKey) {
+      throw new Error("Missing Firebase admin configuration");
+    }
+
+    initializeApp({
+      credential: cert({
+        projectId,
+        clientEmail,
+        privateKey: privateKey.replace(/\\n/g, "\n"),
+      }),
+    });
+  }
+}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -28,34 +60,42 @@ serve(async (req) => {
     }
 
     const token = authHeader.replace("Bearer ", "").trim();
-    const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
-    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-    const brevoApiKey = Deno.env.get("BREVO_API_KEY") ?? "";
-    const otpHashSecret = Deno.env.get("OTP_HASH_SECRET") ?? "life_otp_salt_secret";
-
-    // 1. Authenticate user from JWT
-    const supabaseUserClient = createClient(supabaseUrl, supabaseAnonKey, {
-      global: { headers: { Authorization: `Bearer ${token}` } },
-    });
-
-    const { data: { user: authUser }, error: userAuthError } = await supabaseUserClient.auth.getUser();
-    if (userAuthError || !authUser) {
-      return new Response(JSON.stringify({ ok: false, error: "Invalid or expired session" }), {
+    if (!token) {
+      return new Response(JSON.stringify({ ok: false, error: "Missing Firebase ID token" }), {
         status: 401,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // 2. Authoritative Database Client (Service Role on Server Only)
-    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
+    ensureFirebaseAdmin();
+    const firebaseAuth = getAuth(getApps()[0]);
+    const decodedToken = await firebaseAuth.verifyIdToken(token);
+    const firebaseUid = decodedToken.uid;
+    if (!firebaseUid) {
+      return new Response(JSON.stringify({ ok: false, error: "Invalid Firebase token" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
-    // 3. Check public.users status
+    const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+    const brevoApiKey = Deno.env.get("BREVO_API_KEY") ?? "";
+    const otpHashSecret = Deno.env.get("OTP_HASH_SECRET") ?? "life_otp_salt_secret";
+
+    if (!supabaseUrl || !supabaseServiceKey) {
+      return new Response(JSON.stringify({ ok: false, error: "Missing Supabase configuration" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
     const { data: userRecord, error: userError } = await supabaseAdmin
       .from("users")
       .select("id, register_number, email, name, account_status, is_suspended, is_admin, otp_verified_until")
-      .or(`auth_user_id.eq.${authUser.id},email.eq.${authUser.email}`)
-      .single();
+      .eq("auth_user_id", firebaseUid)
+      .maybeSingle();
 
     if (userError || !userRecord) {
       return new Response(JSON.stringify({ ok: false, error: "Student profile not found" }), {
@@ -71,19 +111,16 @@ serve(async (req) => {
       });
     }
 
-    // Mask student email
-    const emailStr = userRecord.email || authUser.email || "";
-    const atIdx = emailStr.indexOf("@");
-    let maskedEmail = "your registered email";
-    if (atIdx > 1) {
-      const local = emailStr.substring(0, atIdx);
-      const domain = emailStr.substring(atIdx);
-      maskedEmail = local.length <= 2 
-        ? `${local[0]}***${domain}`
-        : `${local[0]}***${local[local.length - 1]}${domain}`;
+    const emailStr = (userRecord.email || "").trim().toLowerCase();
+    if (!emailStr) {
+      return new Response(JSON.stringify({ ok: false, error: "No registered email found for this account" }), {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
-    // 4. Check if already verified today
+    const maskedEmail = maskEmail(emailStr);
+
     if (userRecord.otp_verified_until) {
       const verifiedUntil = new Date(userRecord.otp_verified_until).getTime();
       if (verifiedUntil > Date.now()) {
@@ -99,14 +136,14 @@ serve(async (req) => {
       }
     }
 
-    // 5. Rate limiting: Check if an active OTP was generated in the last 60 seconds
     const oneMinAgo = new Date(Date.now() - 60 * 1000).toISOString();
     const { data: recentOtps } = await supabaseAdmin
       .from("login_otps")
       .select("id, created_at")
       .eq("user_id", userRecord.id)
       .eq("is_used", false)
-      .gt("created_at", oneMinAgo);
+      .gt("created_at", oneMinAgo)
+      .limit(1);
 
     if (recentOtps && recentOtps.length > 0) {
       return new Response(JSON.stringify({
@@ -118,40 +155,33 @@ serve(async (req) => {
       });
     }
 
-    // Invalidate prior unused OTPs for this user
     await supabaseAdmin
       .from("login_otps")
       .update({ is_used: true })
       .eq("user_id", userRecord.id)
       .eq("is_used", false);
 
-    // 6. Generate cryptographically secure 6-digit OTP
-    const array = new Uint32Array(1);
-    crypto.getRandomValues(array);
-    const otpNumber = (array[0] % 900000) + 100000;
-    const otpStr = otpNumber.toString();
+    const otpNumber = crypto.getRandomValues(new Uint32Array(1))[0] % 900000 + 100000;
+    const otpStr = String(otpNumber).padStart(6, "0");
 
-    // 7. Hash OTP server-side with salt
     const encoder = new TextEncoder();
     const hashBuffer = await crypto.subtle.digest(
       "SHA-256",
       encoder.encode(`${otpStr}:${otpHashSecret}:${userRecord.id}`)
     );
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const otpHash = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+    const otpHash = Array.from(new Uint8Array(hashBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
 
-    // 8. Store OTP record with 5 minutes expiry
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-    const { error: insertOtpError } = await supabaseAdmin
-      .from("login_otps")
-      .insert({
-        user_id: userRecord.id,
-        otp_hash: otpHash,
-        attempts: 0,
-        max_attempts: 5,
-        is_used: false,
-        expires_at: expiresAt,
-      });
+    const { error: insertOtpError } = await supabaseAdmin.from("login_otps").insert({
+      user_id: userRecord.id,
+      otp_hash: otpHash,
+      attempts: 0,
+      max_attempts: 5,
+      is_used: false,
+      expires_at: expiresAt,
+    });
 
     if (insertOtpError) {
       return new Response(JSON.stringify({ ok: false, error: "Failed to initiate verification" }), {
@@ -160,8 +190,7 @@ serve(async (req) => {
       });
     }
 
-    // 9. Dispatch Email via Brevo API
-    if (brevoApiKey && emailStr) {
+    if (brevoApiKey) {
       try {
         const brevoResp = await fetch("https://api.brevo.com/v3/smtp/email", {
           method: "POST",
@@ -171,9 +200,9 @@ serve(async (req) => {
             "Accept": "application/json",
           },
           body: JSON.stringify({
-            sender: { 
-              name: Deno.env.get("BREVO_SENDER_NAME") ?? "LIFE Platform", 
-              email: Deno.env.get("BREVO_SENDER_EMAIL") ?? "noreply@campus.edu" 
+            sender: {
+              name: Deno.env.get("BREVO_SENDER_NAME") ?? "LIFE Platform",
+              email: Deno.env.get("BREVO_SENDER_EMAIL") ?? "noreply@campus.edu",
             },
             to: [{ email: emailStr, name: userRecord.name || userRecord.register_number }],
             subject: "Your LIFE Login Verification Code",
@@ -194,14 +223,16 @@ serve(async (req) => {
         });
 
         if (!brevoResp.ok) {
-          console.error("Brevo API delivery error", brevoResp.status);
+          throw new Error("Brevo delivery failed");
         }
-      } catch (brevoErr) {
-        console.error("Brevo request failed", brevoErr);
+      } catch (_err) {
+        return new Response(JSON.stringify({ ok: false, error: "Failed to send verification email" }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
     }
 
-    // 10. Return Response (NEVER returns plaintext OTP)
     return new Response(JSON.stringify({
       ok: true,
       alreadyVerifiedToday: false,
@@ -212,8 +243,12 @@ serve(async (req) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (err) {
-    return new Response(JSON.stringify({ ok: false, error: "Internal server error" }), {
-      status: 500,
+    const message = err instanceof Error && err.message === "Missing Firebase admin configuration"
+      ? "Firebase server configuration is missing"
+      : "Internal server error";
+
+    return new Response(JSON.stringify({ ok: false, error: message }), {
+      status: err instanceof Error && err.message === "Missing Firebase admin configuration" ? 500 : 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }

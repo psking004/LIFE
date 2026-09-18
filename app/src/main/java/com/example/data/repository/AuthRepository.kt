@@ -10,11 +10,18 @@ import com.example.data.remote.api.SupabaseAuthApi
 import com.example.domain.model.AccountStatus
 import com.example.domain.model.LoginEvent
 import com.example.domain.model.User
+import com.google.android.gms.tasks.Tasks
+import com.google.firebase.FirebaseException
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthException
+import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
+import com.google.firebase.auth.FirebaseUser
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
@@ -101,6 +108,10 @@ class AuthRepository(
          */
         fun resetProcessState() {
             _currentProcessUserId.value = null
+        }
+
+        fun setCurrentProcessUser(userId: String) {
+            _currentProcessUserId.value = userId
         }
     }
 
@@ -207,169 +218,16 @@ class AuthRepository(
      * Step 1 & 2: Account Authorization Check and Password Verification.
      * Generates and dispatches a real OTP to the student's registered mobile number.
      */
-        suspend fun requestLoginOtp(registerNumber: String, password: String): Result<OtpChallenge> = withContext(dispatcher) {
-        val normalizedReg = normalizeRegisterNumber(registerNumber)
-        if (normalizedReg.isEmpty()) {
-            return@withContext Result.failure(IllegalArgumentException("Please enter a valid Register Number"))
-        }
-        if (password.trim().isEmpty()) {
-            return@withContext Result.failure(IllegalArgumentException("Please enter your password"))
-        }
-
-        Log.d("LIFE_AUTH", "LOGIN_STARTED")
-        Log.i(TAG, "Step 1: Account status lookup for $normalizedReg")
-
-        // 1. Account Check & Identity Resolution
-        val identityRes = resolveIdentity(normalizedReg)
-        if (identityRes.isFailure) {
-            return@withContext Result.failure(
-                identityRes.exceptionOrNull() ?: IllegalArgumentException("Invalid Register Number or Password")
-            )
-        }
-        val identity = identityRes.getOrThrow()
-        val userEntity = userDao.getUserByRegisterNumber(normalizedReg)
-            ?: return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
-
-        val domainUser = userEntity.toDomain()
-
-        // 2. Password Verification via Supabase
-        val authEmail = identity.authEmail
-        var accessToken = ""
-        
-        try {
-            val response = authApi.signInWithPassword(
-                mapOf("email" to authEmail, "password" to password.trim())
-            )
-            if (response.isSuccessful && response.body()?.accessToken != null) {
-                accessToken = response.body()!!.accessToken!!
-                SupabaseClient.currentAccessToken.set(accessToken)
-                
-                // Set authUserId on the local UserEntity if missing
-                val supabaseUserId = response.body()?.user?.id
-                if (supabaseUserId != null && userEntity.authUserId != supabaseUserId) {
-                    userDao.updateAuthUserId(userEntity.id, supabaseUserId)
-                }
-            } else {
-                return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
-            }
-        } catch (e: Exception) {
-            return@withContext Result.failure(IllegalStateException("Network error connecting to authentication server"))
-        }
-
-        // 3. MFA Factor Enrollment or Verification
-        val phone = domainUser.phoneNumber.ifEmpty { "9876541234" }
-        val masked = maskPhoneNumber(phone)
-        var factorId = ""
-
-        try {
-            // First check if they already have a phone factor
-            val userResp = authApi.getUser("Bearer $accessToken")
-            val factors = userResp.body()?.factors ?: emptyList()
-            val phoneFactor = factors.find { it.factorType == "phone" && it.status == "verified" }
-            
-            if (phoneFactor != null) {
-                factorId = phoneFactor.id
-            } else {
-                // Enroll new phone factor
-                val enrollResp = authApi.enrollFactor("Bearer $accessToken", mapOf(
-                    "factor_type" to "phone",
-                    "phone" to phone
-                ))
-                if (enrollResp.isSuccessful && enrollResp.body() != null) {
-                    factorId = enrollResp.body()!!.id
-                } else {
-                    return@withContext Result.failure(IllegalStateException("Failed to enroll MFA factor"))
-                }
-            }
-            
-            // Create challenge (sends SMS)
-            val challengeResp = authApi.createChallenge("Bearer $accessToken", factorId)
-            if (challengeResp.isSuccessful && challengeResp.body() != null) {
-                val challengeId = challengeResp.body()!!.id
-                return@withContext Result.success(OtpChallenge(
-                    userId = userEntity.id,
-                    registerNumber = normalizedReg,
-                    maskedPhoneNumber = masked,
-                    fullPhoneNumber = phone,
-                    email = authEmail,
-                    factorId = factorId,
-                    challengeId = challengeId,
-                    timestamp = System.currentTimeMillis()
-                ))
-            } else {
-                return@withContext Result.failure(IllegalStateException("Failed to create MFA challenge"))
-            }
-        } catch (e: Exception) {
-            return@withContext Result.failure(IllegalStateException("Network error configuring MFA"))
-        }
+    suspend fun requestLoginOtp(registerNumber: String, password: String): Result<OtpChallenge> = withContext(dispatcher) {
+        return@withContext Result.failure(
+            IllegalStateException("Legacy Supabase password-auth OTP flow is disabled. Use Firebase email/password login and the LIFE email OTP flow.")
+        )
     }
 
     suspend fun verifyOtp(challenge: OtpChallenge, otpCode: String): Result<User> = withContext(dispatcher) {
-        val cleanOtp = otpCode.trim()
-        if (cleanOtp.length != 6 || !cleanOtp.all { it.isDigit() }) {
-            return@withContext Result.failure(IllegalArgumentException("Invalid OTP. Please enter a 6-digit code."))
-        }
-
-        val elapsed = System.currentTimeMillis() - challenge.timestamp
-        if (elapsed > 5 * 60 * 1000) {
-            return@withContext Result.failure(IllegalStateException("OTP expired. Please request a new code."))
-        }
-
-        val token = SupabaseClient.currentAccessToken.get() ?: return@withContext Result.failure(IllegalStateException("Missing auth token"))
-
-        try {
-            val verifyRes = authApi.verifyFactor(
-                "Bearer $token", 
-                challenge.factorId,
-                mapOf(
-                    "challenge_id" to challenge.challengeId,
-                    "code" to cleanOtp
-                )
-            )
-            
-            if (verifyRes.isSuccessful && verifyRes.body()?.accessToken != null) {
-                val newAccessToken = verifyRes.body()!!.accessToken!!
-                val newRefreshToken = verifyRes.body()!!.refreshToken ?: ""
-                SupabaseClient.currentAccessToken.set(newAccessToken)
-                
-                // Session is now AAL2
-                val userEntity = userDao.getUserById(challenge.userId)
-                    ?: return@withContext Result.failure(IllegalStateException("User profile not found"))
-
-                _currentProcessUserId.value = userEntity.id
-                
-                sessionManager.saveSession(
-                    accessToken = newAccessToken,
-                    refreshToken = newRefreshToken,
-                    userId = userEntity.id,
-                    registerNumber = userEntity.registerNumber,
-                    expiresInSeconds = verifyRes.body()!!.expiresIn ?: 3600
-                )
-
-                try {
-                    val loginEvent = LoginEventEntity(
-                        id = UUID.randomUUID().toString(),
-                        userId = userEntity.id,
-                        registerNumber = userEntity.registerNumber,
-                        userName = userEntity.name.ifEmpty { "Student ${userEntity.registerNumber}" },
-                        loginAt = System.currentTimeMillis(),
-                        loginStatus = "SUCCESS",
-                        deviceType = "Android",
-                        appVersion = "1.0.0",
-                        sessionId = newAccessToken // Or parse JWT for session_id
-                    )
-                    loginEventDao.insertLoginEvent(loginEvent)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to record login event: ${e.message}")
-                }
-
-                return@withContext Result.success(userEntity.toDomain())
-            } else {
-                return@withContext Result.failure(IllegalArgumentException("Invalid OTP"))
-            }
-        } catch (e: Exception) {
-            return@withContext Result.failure(IllegalStateException("Network error during OTP verification"))
-        }
+        return@withContext Result.failure(
+            IllegalStateException("Legacy SMS OTP verification is disabled. Use the LIFE email OTP flow.")
+        )
     }
 
     /**
@@ -388,6 +246,9 @@ class AuthRepository(
             if (localUser.isSuspended) {
                 return@withContext Result.failure(IllegalStateException("Your account has been suspended. Contact the administrator."))
             }
+            if (localUser.email.isBlank()) {
+                return@withContext Result.failure(IllegalStateException("Identity resolution failed: no Firebase email is registered for this account."))
+            }
         }
 
         // 2. Attempt server-side RPC
@@ -403,12 +264,15 @@ class AuthRepository(
                     }
                     return@withContext Result.failure(IllegalStateException(errMsg))
                 }
+                if (b.authEmail.isNullOrBlank()) {
+                    return@withContext Result.failure(IllegalStateException("Identity resolution failed: no Firebase email is registered for this account."))
+                }
                 return@withContext Result.success(
                     ResolvedIdentity(
                         userId = b.userId ?: (localUser?.id ?: "user_${normalizedReg.lowercase()}"),
                         registerNumber = b.registerNumber ?: normalizedReg,
-                        authEmail = b.authEmail ?: (localUser?.email?.ifEmpty { "${normalizedReg.lowercase()}@campus.edu" } ?: "${normalizedReg.lowercase()}@campus.edu"),
-                        maskedEmail = b.maskedEmail ?: maskEmail(b.authEmail ?: ""),
+                        authEmail = b.authEmail,
+                        maskedEmail = b.maskedEmail ?: maskEmail(b.authEmail),
                         alreadyVerifiedToday = b.alreadyVerifiedToday,
                         status = b.status ?: "ACTIVE",
                         isAdmin = b.isAdmin
@@ -435,12 +299,15 @@ class AuthRepository(
                     }
                     return@withContext Result.failure(IllegalStateException(errMsg))
                 }
+                if (b.authEmail.isNullOrBlank()) {
+                    return@withContext Result.failure(IllegalStateException("Identity resolution failed: no Firebase email is registered for this account."))
+                }
                 return@withContext Result.success(
                     ResolvedIdentity(
                         userId = b.userId ?: (localUser?.id ?: "user_${normalizedReg.lowercase()}"),
                         registerNumber = b.registerNumber ?: normalizedReg,
-                        authEmail = b.authEmail ?: (localUser?.email?.ifEmpty { "${normalizedReg.lowercase()}@campus.edu" } ?: "${normalizedReg.lowercase()}@campus.edu"),
-                        maskedEmail = b.maskedEmail ?: maskEmail(b.authEmail ?: ""),
+                        authEmail = b.authEmail,
+                        maskedEmail = b.maskedEmail ?: maskEmail(b.authEmail),
                         alreadyVerifiedToday = b.alreadyVerifiedToday,
                         status = b.status ?: "ACTIVE",
                         isAdmin = b.isAdmin
@@ -456,10 +323,14 @@ class AuthRepository(
 
         // 4. Fallback to local Room database
         if (localUser == null) {
-            return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
+            return@withContext Result.failure(IllegalArgumentException("Account Not Found: We couldn't find a LIFE account with this register number."))
         }
 
-        val authEmail = if (localUser.email.isNotBlank()) localUser.email else "${localUser.registerNumber.lowercase()}@campus.edu"
+        val authEmail = localUser.email
+        if (authEmail.isBlank()) {
+            return@withContext Result.failure(IllegalStateException("Identity resolution failed: no Firebase email registered for this account."))
+        }
+
         Result.success(
             ResolvedIdentity(
                 userId = localUser.id,
@@ -474,7 +345,7 @@ class AuthRepository(
     }
 
     /**
-     * Direct password-based login with daily OTP verification.
+     * Direct password-based login with daily email OTP verification.
      *
      * Flow:
      * 1. Register Number + Password validation
@@ -483,11 +354,11 @@ class AuthRepository(
      *    - SUSPENDED -> blocked
      *    - REJECTED -> blocked
      *    - ACTIVE -> allowed
-     * 3. Password verification using configured Supabase Auth backend (signInWithPassword)
-     * 4. Capture real Supabase accessToken, refreshToken, and authUserId
+     * 3. Firebase email/password authentication using the real registered email
+     * 4. Use Firebase ID token for the LIFE OTP backend
      * 5. Check daily OTP state via Edge Function (send-login-otp):
      *    - If alreadyVerifiedToday -> establish session & return LoginStep.Authenticated
-     *    - If not verified -> send OTP to registered email & return LoginStep.OtpRequired
+     *    - If not verified -> send OTP to the registered email & return LoginStep.OtpRequired
      * 6. Record SUCCESS LoginEvent in audit trail
      */
     suspend fun login(registerNumber: String, password: String): Result<LoginStep> = withContext(dispatcher) {
@@ -498,6 +369,7 @@ class AuthRepository(
         if (password.trim().isEmpty()) {
             return@withContext Result.failure(IllegalArgumentException("Please enter your password"))
         }
+
 
         Log.d("LIFE_AUTH", "LOGIN_STARTED for $normalizedReg")
 
@@ -510,27 +382,35 @@ class AuthRepository(
         }
         val identity = identityRes.getOrThrow()
 
-        // 2. Password Verification via authoritative Supabase Auth backend
+        // 2. Firebase email/password authentication using the real registered email
         val accessToken: String
         val refreshToken: String
         val expiresIn: Long
         val supabaseUserId: String?
 
         try {
-            val response = authApi.signInWithPassword(
-                mapOf("email" to identity.authEmail, "password" to password.trim())
-            )
-            if (response.isSuccessful && response.body()?.accessToken != null) {
-                val body = response.body()!!
-                accessToken = body.accessToken!!
-                refreshToken = body.refreshToken ?: ""
-                expiresIn = body.expiresIn ?: 3600L
-                supabaseUserId = body.user?.id
-            } else {
-                return@withContext Result.failure(IllegalArgumentException("Invalid Register Number or Password"))
-            }
+            val firebaseUser = firebaseEmailPasswordSignIn(identity.authEmail, password.trim())
+            val firebaseToken = firebaseUser.getIdToken(false)
+            val tokenResult = Tasks.await(firebaseToken)
+            val firebaseIdToken = tokenResult.token
+                ?: return@withContext Result.failure(IllegalStateException("Firebase authentication succeeded but no ID token was returned."))
+
+            accessToken = firebaseIdToken
+            refreshToken = ""
+            expiresIn = 3600L
+            supabaseUserId = firebaseUser.uid
+            SupabaseClient.currentAccessToken.set(firebaseIdToken)
         } catch (e: Exception) {
-            return@withContext Result.failure(IllegalStateException("Network error connecting to authentication server"))
+            val category = when (e) {
+                is FirebaseAuthInvalidCredentialsException -> "AUTH_INVALID_CREDENTIALS"
+                is FirebaseAuthException -> if (e.errorCode == "ERROR_USER_DISABLED") "AUTH_USER_DISABLED" else "AUTH_CONFIGURATION_ERROR"
+                is FirebaseException -> "AUTH_NETWORK_ERROR"
+                else -> "AUTH_CONFIGURATION_ERROR"
+            }
+            if (com.example.BuildConfig.DEBUG) {
+                Log.d("LIFE_AUTH_DIAGNOSTIC", "$category: ${identity.authEmail.take(32)}")
+            }
+            return@withContext Result.failure(IllegalStateException("Invalid Register Number or Password"))
         }
 
         // 3. Ensure local user profile exists and sync authUserId
@@ -602,10 +482,96 @@ class AuthRepository(
                     )
                 }
             } else {
+                if (com.example.BuildConfig.DEBUG) {
+                    Log.d("LIFE_AUTH_DIAGNOSTIC", "OTP_REQUEST_FAILED: ${otpResponse.code()}")
+                }
                 return@withContext Result.failure(IllegalStateException("Failed to request email OTP: ${otpResponse.code()}"))
             }
         } catch (e: Exception) {
+            if (com.example.BuildConfig.DEBUG) {
+                Log.d("LIFE_AUTH_DIAGNOSTIC", "OTP_REQUEST_FAILED: ${e.javaClass.simpleName}")
+            }
             return@withContext Result.failure(IllegalStateException("Network error requesting email OTP"))
+        }
+    }
+
+    private suspend fun firebaseEmailPasswordSignIn(email: String, password: String): FirebaseUser {
+        val auth = FirebaseAuth.getInstance()
+        val result = Tasks.await(auth.signInWithEmailAndPassword(email, password))
+        return result.user
+            ?: throw IllegalStateException("Firebase authentication succeeded but no user was returned.")
+    }
+
+    fun isAdminAccessAllowed(user: UserEntity?): Boolean {
+        return user != null && user.isAdmin && !user.isSuspended && user.accountStatus == AccountStatus.ACTIVE.name
+    }
+
+    suspend fun adminLogin(email: String, password: String): Result<User> = withContext(dispatcher) {
+        val trimmedEmail = email.trim()
+        if (trimmedEmail.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Please enter your admin email"))
+        }
+        if (password.trim().isEmpty()) {
+            return@withContext Result.failure(IllegalArgumentException("Please enter your password"))
+        }
+
+        val auth = FirebaseAuth.getInstance()
+        try {
+            val firebaseUser = firebaseEmailPasswordSignIn(trimmedEmail, password.trim())
+            val tokenResult = Tasks.await(firebaseUser.getIdToken(false))
+            val idToken = tokenResult.token ?: return@withContext Result.failure(IllegalStateException("Failed to validate admin identity"))
+
+            try {
+                val userResp = authApi.getUser("Bearer $idToken")
+                if (!userResp.isSuccessful || userResp.body() == null) {
+                    auth.signOut()
+                    return@withContext Result.failure(IllegalStateException("Admin access denied"))
+                }
+            } catch (_: Exception) {
+                auth.signOut()
+                return@withContext Result.failure(IllegalStateException("Admin access denied"))
+            }
+
+            val allUsers = userDao.getAllUsers().firstOrNull() ?: emptyList()
+            val matchingUser = allUsers.firstOrNull {
+                it.email.equals(trimmedEmail, ignoreCase = true) || it.authUserId == firebaseUser.uid
+            } ?: run {
+                auth.signOut()
+                return@withContext Result.failure(IllegalStateException("Admin access denied"))
+            }
+
+            if (!isAdminAccessAllowed(matchingUser)) {
+                auth.signOut()
+                val reason = when (matchingUser.accountStatus) {
+                    AccountStatus.PENDING.name -> "Admin account is pending approval."
+                    AccountStatus.SUSPENDED.name -> "Admin account is suspended."
+                    AccountStatus.REJECTED.name -> "Admin account is not authorized."
+                    else -> "Admin access denied."
+                }
+                return@withContext Result.failure(IllegalStateException(reason))
+            }
+
+            val user = matchingUser.toDomain()
+            _currentProcessUserId.value = user.id
+            SupabaseClient.currentAccessToken.set(idToken)
+            sessionManager.saveSession(
+                accessToken = idToken,
+                refreshToken = "",
+                userId = user.id,
+                registerNumber = user.registerNumber,
+                expiresInSeconds = 3600L
+            )
+            recordLoginEvent(matchingUser, "SUCCESS", idToken)
+            return@withContext Result.success(user)
+        } catch (e: Exception) {
+            auth.signOut()
+            val msg = when (e) {
+                is FirebaseAuthInvalidCredentialsException -> "Invalid admin email or password"
+                is FirebaseAuthException -> "Admin authentication failed"
+                is FirebaseException -> "Network error during admin authentication"
+                else -> e.message ?: "Admin login failed"
+            }
+            return@withContext Result.failure(IllegalStateException(msg))
         }
     }
 
@@ -668,16 +634,43 @@ class AuthRepository(
     }
 
     /**
-     * First-login permanent password setup.
+     * First-login password setup.
+     * This updates the password in Firebase Auth (client), then notifies the server
+     * to clear `is_first_login` for the associated Supabase user.
+     * Never store password or its hash locally.
      */
     suspend fun setupFirstLoginPassword(userId: String, newPassword: String): Result<Unit> = withContext(dispatcher) {
         if (newPassword.trim().length < 6) {
             return@withContext Result.failure(IllegalArgumentException("Password must be at least 6 characters"))
         }
 
-        userDao.updatePassword(userId, newPassword.trim())
-        Log.i(TAG, "First-login password updated for ID: $userId")
-        Result.success(Unit)
+        try {
+            val auth = FirebaseAuth.getInstance()
+            val currentUser = auth.currentUser ?: return@withContext Result.failure(IllegalStateException("No authenticated Firebase user found"))
+
+            // Update Firebase password for the currently signed-in user
+            val updateTask = currentUser.updatePassword(newPassword.trim())
+            Tasks.await(updateTask)
+
+            // Obtain a fresh ID token to call server-side RPC
+            val tokenResult = Tasks.await(currentUser.getIdToken(false))
+            val idToken = tokenResult.token ?: return@withContext Result.failure(IllegalStateException("Failed to obtain Firebase ID token"))
+
+            // Call server-side function to mark first-login complete
+            try {
+                val resp = authApi.completeFirstLogin("Bearer $idToken")
+                if (resp.isSuccessful && resp.body()?.ok == true) {
+                    Log.i(TAG, "First-login completed server-side for Firebase UID: ${currentUser.uid}")
+                    return@withContext Result.success(Unit)
+                } else {
+                    return@withContext Result.failure(IllegalStateException("Failed to mark first-login complete on server"))
+                }
+            } catch (e: Exception) {
+                return@withContext Result.failure(IllegalStateException("Network error while finalizing first login"))
+            }
+        } catch (e: Exception) {
+            return@withContext Result.failure(IllegalStateException("Failed to update Firebase password: ${e.message}"))
+        }
     }
 
     /**
@@ -726,7 +719,17 @@ class AuthRepository(
             return@withContext Result.failure(IllegalArgumentException("Account with register number $normalizedReg already exists"))
         }
 
-        val studentEmail = email.trim().ifEmpty { "${normalizedReg.lowercase()}@campus.edu" }
+        val studentEmail = email.trim()
+        if (studentEmail.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("A real Firebase email is required for student account creation."))
+        }
+        if (!android.util.Patterns.EMAIL_ADDRESS.matcher(studentEmail).matches()) {
+            return@withContext Result.failure(IllegalArgumentException("Please enter a valid email address."))
+        }
+        val lowerEmail = studentEmail.lowercase()
+        if (lowerEmail.endsWith("@life.edu") || lowerEmail.endsWith("@campus.edu")) {
+            return@withContext Result.failure(IllegalArgumentException("Use the student's real email address, not a synthetic campus email."))
+        }
         var authUserId: String? = null
         val adminToken = SupabaseClient.currentAccessToken.get()
 
@@ -757,7 +760,6 @@ class AuthRepository(
             id = userId,
             authUserId = authUserId,
             registerNumber = normalizedReg,
-            passwordHash = "",
             name = name.trim().ifEmpty { "Student $normalizedReg" },
             phoneNumber = phoneNumber.trim().ifEmpty { "9876541234" },
             department = department.trim().ifEmpty { "Computer Science & Engineering" },
@@ -772,6 +774,65 @@ class AuthRepository(
         userDao.insertUser(entity)
         Log.i(TAG, "Admin ${admin.registerNumber} created PENDING student account for $normalizedReg")
         Result.success(entity.toDomain())
+    }
+
+    /**
+     * Self-service student signup. Creates Firebase user server-side and inserts PENDING LIFE user.
+     */
+    suspend fun registerStudent(
+        registerNumber: String,
+        password: String,
+        email: String,
+        phoneNumber: String,
+        name: String = "",
+        department: String = "Computer Science & Engineering"
+    ): Result<User> = withContext(dispatcher) {
+        val normalizedReg = normalizeRegisterNumber(registerNumber)
+        if (normalizedReg.isEmpty()) return@withContext Result.failure(IllegalArgumentException("Register number cannot be empty"))
+
+        if (email.trim().isBlank() || !android.util.Patterns.EMAIL_ADDRESS.matcher(email.trim()).matches()) {
+            return@withContext Result.failure(IllegalArgumentException("A valid email is required"))
+        }
+
+        try {
+            val resp = authApi.selfSignUp(
+                mapOf(
+                    "register_number" to normalizedReg,
+                    "initial_password" to password.trim(),
+                    "email" to email.trim(),
+                    "phone_number" to phoneNumber.trim(),
+                    "name" to name.trim(),
+                    "department" to department.trim()
+                )
+            )
+
+            if (resp.isSuccessful && resp.body()?.ok == true) {
+                val userId = resp.body()?.userId ?: "user_${normalizedReg.lowercase()}"
+                val entity = UserEntity(
+                    id = userId,
+                    authUserId = resp.body()?.userId,
+                    registerNumber = normalizedReg,
+                    name = name.trim().ifEmpty { "Student $normalizedReg" },
+                    phoneNumber = phoneNumber.trim(),
+                    department = department.trim().ifEmpty { "Computer Science & Engineering" },
+                    email = email.trim(),
+                    emailVerified = true,
+                    accountStatus = AccountStatus.PENDING.name,
+                    isFirstLogin = true,
+                    isSuspended = false,
+                    isAdmin = false,
+                    createdAt = System.currentTimeMillis()
+                )
+                userDao.insertUser(entity)
+                return@withContext Result.success(entity.toDomain())
+            } else {
+                val err = resp.body()?.error?.takeIf { it.isNotBlank() }
+                    ?: "Unable to create account. Please try again."
+                return@withContext Result.failure(IllegalStateException(err))
+            }
+        } catch (e: Exception) {
+            return@withContext Result.failure(IllegalStateException("Unable to create account. Please try again."))
+        }
     }
 
     suspend fun approveStudentAccount(adminUserId: String, targetUserId: String): Result<Unit> = withContext(dispatcher) {

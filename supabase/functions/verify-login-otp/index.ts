@@ -1,5 +1,7 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.8";
+import { cert, getApps, initializeApp } from "npm:firebase-admin/app";
+import { getAuth } from "npm:firebase-admin/auth";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -7,17 +9,12 @@ const corsHeaders = {
 };
 
 function calculateNextMidnightAsiaKolkata(): string {
-  // Asia/Kolkata is UTC+5:30 (330 minutes)
   const now = new Date();
   const utcMillis = now.getTime();
   const kolkataOffsetMillis = (5 * 60 + 30) * 60 * 1000;
   const kolkataDate = new Date(utcMillis + kolkataOffsetMillis);
-
-  // Set to next day 00:00:00 in Kolkata time
   kolkataDate.setUTCDate(kolkataDate.getUTCDate() + 1);
   kolkataDate.setUTCHours(0, 0, 0, 0);
-
-  // Convert back to UTC ISO
   const nextMidnightUtc = new Date(kolkataDate.getTime() - kolkataOffsetMillis);
   return nextMidnightUtc.toISOString();
 }
@@ -31,6 +28,26 @@ function timingSafeEqual(a: string, b: string): boolean {
     result |= a.charCodeAt(i) ^ b.charCodeAt(i);
   }
   return result === 0;
+}
+
+function ensureFirebaseAdmin() {
+  if (getApps().length === 0) {
+    const projectId = Deno.env.get("FIREBASE_PROJECT_ID") ?? "";
+    const clientEmail = Deno.env.get("FIREBASE_CLIENT_EMAIL") ?? "";
+    const privateKey = Deno.env.get("FIREBASE_PRIVATE_KEY") ?? "";
+
+    if (!projectId || !clientEmail || !privateKey) {
+      throw new Error("Missing Firebase admin configuration");
+    }
+
+    initializeApp({
+      credential: cert({
+        projectId,
+        clientEmail,
+        privateKey: privateKey.replace(/\\n/g, "\n"),
+      }),
+    });
+  }
 }
 
 serve(async (req) => {
@@ -55,6 +72,13 @@ serve(async (req) => {
     }
 
     const token = authHeader.replace("Bearer ", "").trim();
+    if (!token) {
+      return new Response(JSON.stringify({ ok: false, error: "Missing Firebase ID token" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const body = await req.json().catch(() => ({}));
     const submittedOtp = (body.otp ?? "").toString().trim();
 
@@ -66,32 +90,34 @@ serve(async (req) => {
     }
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
     const otpHashSecret = Deno.env.get("OTP_HASH_SECRET") ?? "life_otp_salt_secret";
 
-    // 1. Authenticate user from JWT
-    const supabaseUserClient = createClient(supabaseUrl, supabaseAnonKey, {
-      global: { headers: { Authorization: `Bearer ${token}` } },
-    });
+    if (!supabaseUrl || !supabaseServiceKey) {
+      return new Response(JSON.stringify({ ok: false, error: "Missing Supabase configuration" }), {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
-    const { data: { user: authUser }, error: userAuthError } = await supabaseUserClient.auth.getUser();
-    if (userAuthError || !authUser) {
-      return new Response(JSON.stringify({ ok: false, error: "Invalid or expired session" }), {
+    ensureFirebaseAdmin();
+    const firebaseAuth = getAuth(getApps()[0]);
+    const decodedToken = await firebaseAuth.verifyIdToken(token);
+    const firebaseUid = decodedToken.uid;
+    if (!firebaseUid) {
+      return new Response(JSON.stringify({ ok: false, error: "Invalid Firebase token" }), {
         status: 401,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // 2. Authoritative Database Client
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
 
-    // 3. Look up user record
     const { data: userRecord, error: userError } = await supabaseAdmin
       .from("users")
       .select("id, register_number, account_status, is_suspended")
-      .or(`auth_user_id.eq.${authUser.id},email.eq.${authUser.email}`)
-      .single();
+      .eq("auth_user_id", firebaseUid)
+      .maybeSingle();
 
     if (userError || !userRecord) {
       return new Response(JSON.stringify({ ok: false, error: "Student profile not found" }), {
@@ -107,7 +133,6 @@ serve(async (req) => {
       });
     }
 
-    // 4. Fetch the newest active OTP for this user
     const nowIso = new Date().toISOString();
     const { data: otps, error: otpFetchError } = await supabaseAdmin
       .from("login_otps")
@@ -127,7 +152,6 @@ serve(async (req) => {
 
     const activeOtp = otps[0];
 
-    // Check attempt limit
     if (activeOtp.attempts >= activeOtp.max_attempts) {
       await supabaseAdmin
         .from("login_otps")
@@ -143,7 +167,6 @@ serve(async (req) => {
       });
     }
 
-    // Hash submitted OTP with the same salt & user id
     const encoder = new TextEncoder();
     const hashBuffer = await crypto.subtle.digest(
       "SHA-256",
@@ -152,11 +175,9 @@ serve(async (req) => {
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     const submittedHash = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 
-    // Timing-safe comparison
     const isMatch = timingSafeEqual(submittedHash, activeOtp.otp_hash);
 
     if (!isMatch) {
-      // Increment failed attempts
       const nextAttempts = activeOtp.attempts + 1;
       const willInvalidate = nextAttempts >= activeOtp.max_attempts;
 
@@ -169,7 +190,7 @@ serve(async (req) => {
         .eq("id", activeOtp.id);
 
       const remaining = activeOtp.max_attempts - nextAttempts;
-      const errorMsg = remaining > 0 
+      const errorMsg = remaining > 0
         ? `Incorrect code. ${remaining} attempt(s) remaining.`
         : "Too many failed attempts. Please request a new code.";
 
@@ -179,7 +200,6 @@ serve(async (req) => {
       });
     }
 
-    // OTP Matched: Mark used and set otp_verified_until to next midnight Asia/Kolkata
     await supabaseAdmin
       .from("login_otps")
       .update({ is_used: true })
@@ -191,7 +211,7 @@ serve(async (req) => {
       .from("users")
       .update({
         otp_verified_until: nextMidnightKolkata,
-        auth_user_id: authUser.id,
+        auth_user_id: firebaseUid,
       })
       .eq("id", userRecord.id);
 
@@ -203,7 +223,11 @@ serve(async (req) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (err) {
-    return new Response(JSON.stringify({ ok: false, error: "Internal server error" }), {
+    const message = err instanceof Error && err.message === "Missing Firebase admin configuration"
+      ? "Firebase server configuration is missing"
+      : "Internal server error";
+
+    return new Response(JSON.stringify({ ok: false, error: message }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

@@ -28,33 +28,38 @@ import org.robolectric.annotation.Config
 class AuthFlowTest {
 
     private val mockAuthApi = object : com.example.data.remote.api.SupabaseAuthApi {
-        override suspend fun signInWithPassword(request: Map<String, String>): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthTokenResponse> {
-            val email = request["email"] ?: ""
-            val pwd = request["password"] ?: ""
-            if ((email.startsWith("23cse042@") && pwd == "student123") ||
-                (email.startsWith("23cse001@") && pwd == "pass123") ||
-                (email.startsWith("23cse099@") && pwd == "welcome") ||
-                (email.startsWith("admin01@") && pwd == "admin123")) {
-                return retrofit2.Response.success(com.example.data.remote.dto.SupabaseAuthTokenResponse(
+        override suspend fun signUp(request: Map<String, Any>): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthTokenResponse> {
+            // Minimal realistic token response for tests
+            return retrofit2.Response.success(
+                com.example.data.remote.dto.SupabaseAuthTokenResponse(
                     accessToken = "mock_access_token",
                     user = com.example.data.remote.dto.SupabaseAuthUserDto(id = "mock_user_id")
-                ))
-            }
-            return retrofit2.Response.error(401, okhttp3.ResponseBody.create(null, ""))
+                )
+            )
         }
-        
-        override suspend fun enrollFactor(bearerToken: String, request: Map<String, String>): retrofit2.Response<com.example.data.remote.dto.SupabaseFactorDto> {
-            return retrofit2.Response.success(com.example.data.remote.dto.SupabaseFactorDto(id = "mock_factor_id", factorType = "phone", status = "unverified"))
+
+        override suspend fun refreshToken(request: Map<String, String>): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthTokenResponse> {
+            return retrofit2.Response.success(
+                com.example.data.remote.dto.SupabaseAuthTokenResponse(
+                    accessToken = "mock_refreshed_access_token",
+                    refreshToken = "mock_refresh",
+                    expiresIn = 3600L
+                )
+            )
         }
-        
-        override suspend fun createChallenge(bearerToken: String, factorId: String, request: Map<String, String>): retrofit2.Response<com.example.data.remote.dto.SupabaseChallengeDto> {
-            return retrofit2.Response.success(com.example.data.remote.dto.SupabaseChallengeDto(id = "mock_challenge_id"))
+
+        override suspend fun getUser(bearerToken: String): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthUserDto> {
+            return retrofit2.Response.success(com.example.data.remote.dto.SupabaseAuthUserDto(id = "mock_user_id", factors = emptyList()))
         }
-        
-        override suspend fun verifyFactor(bearerToken: String, factorId: String, request: Map<String, String>): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthTokenResponse> {
-            return retrofit2.Response.error(400, okhttp3.ResponseBody.create(null, ""))
+
+        override suspend fun updateUser(bearerToken: String, updates: Map<String, Any?>): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthUserDto> {
+            return retrofit2.Response.success(com.example.data.remote.dto.SupabaseAuthUserDto(id = "mock_user_id", factors = emptyList()))
         }
-        
+
+        override suspend fun logout(bearerToken: String): retrofit2.Response<Unit> {
+            return retrofit2.Response.success(Unit)
+        }
+
         override suspend fun sendLoginOtp(bearerToken: String): retrofit2.Response<com.example.data.remote.dto.SendLoginOtpResponse> {
             return retrofit2.Response.success(com.example.data.remote.dto.SendLoginOtpResponse(ok = true, alreadyVerifiedToday = true))
         }
@@ -103,19 +108,14 @@ class AuthFlowTest {
             return retrofit2.Response.success(com.example.data.remote.dto.AdminManageUserResponse(ok = true, userId = "mock_admin_user_id"))
         }
 
-        override suspend fun logout(bearerToken: String): retrofit2.Response<Unit> {
-            return retrofit2.Response.success(Unit)
+        override suspend fun selfSignUp(request: Map<String, Any?>): retrofit2.Response<com.example.data.remote.dto.AdminManageUserResponse> {
+            val reg = request["register_number"] as? String ?: "new_reg"
+            return retrofit2.Response.success(com.example.data.remote.dto.AdminManageUserResponse(ok = true, userId = "user_${reg.lowercase()}"))
         }
 
-        // Dummy implementations for unused methods
-        override suspend fun signUp(request: Map<String, Any>): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthTokenResponse> = retrofit2.Response.success(null)
-        override suspend fun refreshToken(request: Map<String, String>): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthTokenResponse> = retrofit2.Response.success(null)
-        override suspend fun getUser(bearerToken: String): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthUserDto> {
-            return retrofit2.Response.success(com.example.data.remote.dto.SupabaseAuthUserDto(id = "mock_user_id", factors = emptyList()))
+        override suspend fun completeFirstLogin(bearerToken: String, request: Map<String, Any?>): retrofit2.Response<com.example.data.remote.dto.AdminManageUserResponse> {
+            return retrofit2.Response.success(com.example.data.remote.dto.AdminManageUserResponse(ok = true))
         }
-        override suspend fun updateUser(bearerToken: String, updates: Map<String, Any?>): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthUserDto> = retrofit2.Response.success(null)
-        override suspend fun sendOtp(request: Map<String, Any>): retrofit2.Response<Map<String, Any?>> = retrofit2.Response.success(null)
-        override suspend fun verifyOtp(request: Map<String, Any>): retrofit2.Response<com.example.data.remote.dto.SupabaseAuthTokenResponse> = retrofit2.Response.success(null)
     }
 
 
@@ -267,7 +267,8 @@ class AuthFlowTest {
         val updatedUser = database.userDao().getUserById(user.id)
         assertNotNull(updatedUser)
         assertFalse(updatedUser!!.isFirstLogin)
-        assertEquals("newSecurePass123", updatedUser.passwordHash)
+        // First-login flag should be cleared; password must not be stored locally
+        assertFalse(updatedUser.isFirstLogin)
     }
 
     @Test

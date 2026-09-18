@@ -57,6 +57,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.BuildConfig
 import com.example.ui.components.LifeLogo
 import com.example.ui.theme.GbBorderLight
 import com.example.ui.theme.GbPrimary
@@ -65,6 +66,8 @@ import com.example.ui.theme.GbPrimaryContainer
 @Composable
 fun LoginScreen(
     onLoginSubmit: (String, String) -> Unit,
+    onSignUpClick: () -> Unit = {},
+    onAdminLoginClick: () -> Unit = {},
     serverError: String? = null,
     isLoading: Boolean = false,
     onClearError: () -> Unit = {},
@@ -82,6 +85,11 @@ fun LoginScreen(
         Log.d("LIFE_REAL_LOGIN", "BUTTON_CLICKED")
         focusManager.clearFocus()
         val reg = registerNumber.trim().uppercase()
+        // Prevent demo identities from being entered via the UI
+        if (reg == "23CSE001" || reg == "23CSE002" || reg == "ADMIN01") {
+            validationError = "Please enter your Register Number"
+            return
+        }
         if (reg.isEmpty()) {
             validationError = "Please enter your Register Number"
             return
@@ -168,7 +176,7 @@ fun LoginScreen(
                             .fillMaxWidth()
                             .testTag("register_number_input"),
                         label = { Text("Register Number") },
-                        placeholder = { Text("e.g. 23CSE001") },
+                        placeholder = { Text("") },
                         leadingIcon = {
                             Icon(
                                 imageVector = Icons.Default.Badge,
@@ -315,81 +323,40 @@ fun LoginScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(28.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            // Quick Demo Credentials Card
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-                ),
-                border = CardDefaults.outlinedCardBorder().copy(
-                    brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.outlineVariant)
+            // Sign Up link
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                Text(
+                    text = "New to LIFE? ",
+                    style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
                 )
-            ) {
-                Column(
+                Text(
+                    text = "Create Account",
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Key,
-                            contentDescription = null,
-                            tint = GbPrimary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Quick Demo Accounts (Tap to fill):",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            ),
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    // Preset buttons
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        DemoAccountChip(
-                            label = "Student 1",
-                            reg = "23CSE001",
-                            pass = "pass123",
-                            modifier = Modifier.weight(1f)
-                        ) { r, p ->
-                            registerNumber = r
-                            password = p
-                        }
-
-                        DemoAccountChip(
-                            label = "Student 2",
-                            reg = "23CSE002",
-                            pass = "pass123",
-                            modifier = Modifier.weight(1f)
-                        ) { r, p ->
-                            registerNumber = r
-                            password = p
-                        }
-
-                        DemoAccountChip(
-                            label = "Admin",
-                            reg = "ADMIN01",
-                            pass = "admin123",
-                            modifier = Modifier.weight(1f)
-                        ) { r, p ->
-                            registerNumber = r
-                            password = p
-                        }
-                    }
-                }
+                        .clickable { onSignUpClick() }
+                        .testTag("signup_link"),
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = GbPrimary
+                    )
+                )
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Administrator? Admin Login",
+                modifier = Modifier
+                    .clickable { onAdminLoginClick() }
+                    .testTag("admin_login_link"),
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    color = GbPrimary
+                )
+            )
+
+            // Demo accounts removed for production and debug.
         }
     }
 }

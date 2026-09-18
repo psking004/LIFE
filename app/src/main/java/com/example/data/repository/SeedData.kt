@@ -12,7 +12,6 @@ object SeedData {
         UserEntity(
             id = "user_23cse001",
             registerNumber = "23CSE001",
-            passwordHash = "pass123", // Demo Student 1
             name = "Aarav Sharma",
             phoneNumber = "9876541234",
             department = "Computer Science & Engineering",
@@ -24,7 +23,6 @@ object SeedData {
         UserEntity(
             id = "user_23cse002",
             registerNumber = "23CSE002",
-            passwordHash = "pass123", // Demo Student 2
             name = "Diya Patel",
             phoneNumber = "9876545678",
             department = "Computer Science & Engineering",
@@ -36,7 +34,6 @@ object SeedData {
         UserEntity(
             id = "user_admin",
             registerNumber = "ADMIN01",
-            passwordHash = "admin123", // Demo Admin
             name = "Campus Administrator",
             phoneNumber = "9876549999",
             department = "Administration",
@@ -48,7 +45,6 @@ object SeedData {
         UserEntity(
             id = "user_23cse042",
             registerNumber = "23CSE042",
-            passwordHash = "student123",
             name = "Rohan Verma",
             phoneNumber = "9876544242",
             department = "Information Technology",
@@ -60,7 +56,6 @@ object SeedData {
         UserEntity(
             id = "user_23cse018",
             registerNumber = "23CSE018",
-            passwordHash = "student123",
             name = "Priya Sundaram",
             phoneNumber = "9876541818",
             department = "Computer Science & Engineering",
@@ -72,7 +67,6 @@ object SeedData {
         UserEntity(
             id = "user_23cse031",
             registerNumber = "23CSE031",
-            passwordHash = "student123",
             name = "Karthik Raj",
             phoneNumber = "9876543131",
             department = "Artificial Intelligence & Data Science",
@@ -84,7 +78,6 @@ object SeedData {
         UserEntity(
             id = "user_23cse077",
             registerNumber = "23CSE077",
-            passwordHash = "student123",
             name = "Ananya Iyer",
             phoneNumber = "9876547777",
             department = "Computer Science & Engineering",
@@ -96,7 +89,6 @@ object SeedData {
         UserEntity(
             id = "user_23cse015",
             registerNumber = "23CSE015",
-            passwordHash = "student123",
             name = "Siddharth Nair",
             phoneNumber = "9876541515",
             department = "Electrical & Electronics Engineering",
@@ -108,7 +100,6 @@ object SeedData {
         UserEntity(
             id = "user_new_student",
             registerNumber = "23CSE099",
-            passwordHash = "welcome",
             name = "Tanvi Reddy",
             phoneNumber = "9876549911",
             department = "Computer Science & Engineering",
@@ -120,7 +111,6 @@ object SeedData {
         UserEntity(
             id = "user_suspended_student",
             registerNumber = "23CSE088",
-            passwordHash = "pass123",
             name = "Vikram Joshi",
             phoneNumber = "9876548822",
             department = "Electronics & Communication",

@@ -75,12 +75,16 @@ fun LifeApp(
     val loginError by viewModel.loginError.collectAsState()
     val isLoggingIn by viewModel.isLoggingIn.collectAsState()
     val activeOtpChallenge by viewModel.activeOtpChallenge.collectAsState()
+    val accountNotFound by viewModel.accountNotFound.collectAsState()
 
     // Navigation sub-states
     var isSearching by remember { mutableStateOf(false) }
     var createMode by remember { mutableStateOf<CreateMode?>(null) }
     var editingNode by remember { mutableStateOf<IdeaNode?>(null) }
     var showAdminDialog by remember { mutableStateOf(false) }
+    var showSignUp by remember { mutableStateOf(false) }
+    var showSignUpSubmitted by remember { mutableStateOf(false) }
+    var showAdminLogin by remember { mutableStateOf(false) }
     var firstLoginUser by remember { mutableStateOf<User?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -120,16 +124,59 @@ fun LifeApp(
                     onClearError = { viewModel.clearLoginError() }
                 )
             } else {
-                LoginScreen(
-                    onLoginSubmit = { reg, pass ->
-                        viewModel.login(reg, pass, onFirstLoginNeeded = { u ->
-                            firstLoginUser = u
-                        })
-                    },
-                    serverError = loginError,
-                    isLoading = isLoggingIn,
-                    onClearError = { viewModel.clearLoginError() }
-                )
+                if (accountNotFound != null) {
+                    com.example.ui.screens.auth.AccountNotFoundScreen(
+                        onCreateAccount = {
+                            viewModel.clearAccountNotFound()
+                            showSignUp = true
+                        },
+                        onBackToSignIn = { viewModel.clearAccountNotFound() }
+                    )
+                } else if (showSignUp) {
+                    com.example.ui.screens.auth.SignUpScreen(
+                        onCreateAccount = { reg, pass, email, phone, name, dept ->
+                            showSignUp = false
+                            viewModel.signUpStudent(reg, pass, email, phone, name ?: "", dept ?: "Computer Science & Engineering") { success, _ ->
+                                if (success) showSignUpSubmitted = true
+                            }
+                        },
+                        onBackToSignIn = { showSignUp = false },
+                        serverError = loginError,
+                        isLoading = isLoggingIn
+                    )
+                } else if (showSignUpSubmitted) {
+                    com.example.ui.screens.auth.SignupSubmittedScreen(
+                        onBackToSignIn = { showSignUpSubmitted = false }
+                    )
+                } else if (showAdminLogin) {
+                    com.example.ui.screens.auth.AdminLoginScreen(
+                        onAdminLoginSubmit = { email, pass ->
+                            viewModel.adminLogin(email, pass) {
+                                showAdminLogin = false
+                            }
+                        },
+                        onBackToStudentLogin = {
+                            showAdminLogin = false
+                            viewModel.clearLoginError()
+                        },
+                        serverError = loginError,
+                        isLoading = isLoggingIn,
+                        onClearError = { viewModel.clearLoginError() }
+                    )
+                } else {
+                    LoginScreen(
+                        onLoginSubmit = { reg, pass ->
+                            viewModel.login(reg, pass, onFirstLoginNeeded = { u ->
+                                firstLoginUser = u
+                            })
+                        },
+                        onSignUpClick = { showSignUp = true },
+                        onAdminLoginClick = { showAdminLogin = true },
+                        serverError = loginError,
+                        isLoading = isLoggingIn,
+                        onClearError = { viewModel.clearLoginError() }
+                    )
+                }
             }
 
             SnackbarHost(
@@ -343,8 +390,8 @@ fun LifeApp(
                 AdminManagementDialog(
                     users = allUsers,
                     loginEvents = loginEvents,
-                    onCreateStudent = { name, reg, phone, dept ->
-                        viewModel.createStudent(name, reg, phone, dept)
+                    onCreateStudent = { name, reg, phone, dept, email, password ->
+                        viewModel.createStudent(name, reg, phone, dept, email, password)
                     },
                     onApproveStudent = { id ->
                         viewModel.approveStudent(id)
