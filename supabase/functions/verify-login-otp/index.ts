@@ -113,13 +113,28 @@ serve(async (req) => {
 
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
 
-    const { data: userRecord, error: userError } = await supabaseAdmin
+    let { data: userRecord, error: userError } = await supabaseAdmin
       .from("users")
-      .select("id, register_number, account_status, is_suspended")
+      .select("id, register_number, email, account_status, is_suspended")
       .eq("auth_user_id", firebaseUid)
       .maybeSingle();
 
+    if (!userRecord && decodedToken.email) {
+      const emailStr = decodedToken.email.toLowerCase();
+      const { data: emailUser } = await supabaseAdmin
+        .from("users")
+        .select("id, register_number, email, account_status, is_suspended, auth_user_id")
+        .ilike("email", emailStr)
+        .maybeSingle();
+        
+      if (emailUser) {
+        await supabaseAdmin.from("users").update({ auth_user_id: firebaseUid }).eq("id", emailUser.id);
+        userRecord = emailUser;
+      }
+    }
+
     if (userError || !userRecord) {
+      console.error("verify-login-otp: user not found for firebaseUid:", firebaseUid);
       return new Response(JSON.stringify({ ok: false, error: "Student profile not found" }), {
         status: 403,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -136,9 +151,9 @@ serve(async (req) => {
     const nowIso = new Date().toISOString();
     const { data: otps, error: otpFetchError } = await supabaseAdmin
       .from("login_otps")
-      .select("id, otp_hash, attempts, max_attempts, expires_at, is_used")
+      .select("id, otp_hash, attempts, expires_at, used_at")
       .eq("user_id", userRecord.id)
-      .eq("is_used", false)
+      .is("used_at", null)
       .gt("expires_at", nowIso)
       .order("created_at", { ascending: false })
       .limit(1);
@@ -152,10 +167,10 @@ serve(async (req) => {
 
     const activeOtp = otps[0];
 
-    if (activeOtp.attempts >= activeOtp.max_attempts) {
+    if (activeOtp.attempts >= 5) {
       await supabaseAdmin
         .from("login_otps")
-        .update({ is_used: true })
+        .update({ used_at: nowIso })
         .eq("id", activeOtp.id);
 
       return new Response(JSON.stringify({
@@ -179,17 +194,19 @@ serve(async (req) => {
 
     if (!isMatch) {
       const nextAttempts = activeOtp.attempts + 1;
-      const willInvalidate = nextAttempts >= activeOtp.max_attempts;
+      const updates: Record<string, any> = {
+        attempts: nextAttempts,
+      };
+      if (nextAttempts >= 5) {
+        updates.used_at = nowIso;
+      }
 
       await supabaseAdmin
         .from("login_otps")
-        .update({
-          attempts: nextAttempts,
-          is_used: willInvalidate,
-        })
+        .update(updates)
         .eq("id", activeOtp.id);
 
-      const remaining = activeOtp.max_attempts - nextAttempts;
+      const remaining = 5 - nextAttempts;
       const errorMsg = remaining > 0
         ? `Incorrect code. ${remaining} attempt(s) remaining.`
         : "Too many failed attempts. Please request a new code.";
@@ -200,9 +217,10 @@ serve(async (req) => {
       });
     }
 
+    // Success -> mark as used
     await supabaseAdmin
       .from("login_otps")
-      .update({ is_used: true })
+      .update({ used_at: nowIso })
       .eq("id", activeOtp.id);
 
     const nextMidnightKolkata = calculateNextMidnightAsiaKolkata();
@@ -222,12 +240,9 @@ serve(async (req) => {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-  } catch (err) {
-    const message = err instanceof Error && err.message === "Missing Firebase admin configuration"
-      ? "Firebase server configuration is missing"
-      : "Internal server error";
-
-    return new Response(JSON.stringify({ ok: false, error: message }), {
+  } catch (err: any) {
+    console.error("verify-login-otp unhandled error:", err?.message ?? err);
+    return new Response(JSON.stringify({ ok: false, error: err?.message ?? "Internal server error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

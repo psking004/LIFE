@@ -32,19 +32,30 @@ class SupabaseSyncManager(
             try {
                 val remoteUsers = api.getUsers()
                 if (remoteUsers.isNotEmpty()) {
-                    val userEntities = remoteUsers.map { dto ->
+                    val userEntities = remoteUsers.mapNotNull { dto ->
+                        val regNum = dto.registerNumber?.ifBlank { if (dto.isAdmin == true) "ADMIN" else null } ?: (if (dto.isAdmin == true) "ADMIN" else return@mapNotNull null)
+                        val id = dto.id ?: return@mapNotNull null
                         UserEntity(
-                            id = dto.id,
-                            registerNumber = dto.registerNumber,
-                            email = dto.email,
-                            emailVerified = dto.emailVerified,
-                            isFirstLogin = dto.isFirstLogin,
-                            isSuspended = dto.isSuspended,
-                            isAdmin = dto.isAdmin,
-                            createdAt = dto.createdAt
+                            id = id,
+                            authUserId = dto.authUserId,
+                            registerNumber = regNum,
+                            name = dto.name ?: if (dto.isAdmin == true) "Administrator" else "Student $regNum",
+                            phoneNumber = dto.phoneNumber ?: "",
+                            department = dto.department ?: "Computer Science & Engineering",
+                            email = dto.email ?: "",
+                            emailVerified = dto.emailVerified ?: false,
+                            accountStatus = dto.accountStatus ?: "ACTIVE",
+                            isFirstLogin = dto.isFirstLogin ?: false,
+                            isSuspended = dto.isSuspended ?: false,
+                            isAdmin = dto.isAdmin ?: false,
+                            createdAt = dto.createdAt ?: System.currentTimeMillis(),
+                            approvedAt = dto.approvedAt,
+                            approvedBy = dto.approvedBy
                         )
                     }
-                    database.userDao().insertUsers(userEntities)
+                    for (user in userEntities) {
+                        database.userDao().insertUser(user)
+                    }
                     Log.d(TAG, "Synced ${userEntities.size} users from Supabase")
                 }
             } catch (e: Exception) {
@@ -157,14 +168,13 @@ class SupabaseSyncManager(
      */
     suspend fun pushVote(vote: VoteEntity) = withContext(Dispatchers.IO) {
         try {
-            val dto = SupabaseVoteDto(
-                id = vote.id,
-                nodeId = vote.nodeId,
-                userId = vote.userId,
-                createdAt = vote.createdAt
-            )
-            api.insertVote(dto)
-            Log.d(TAG, "Successfully pushed vote ${vote.id} to Supabase")
+            val body = mapOf("p_node_id" to vote.nodeId)
+            val response = api.castVote(body)
+            if (response.isSuccessful) {
+                Log.d(TAG, "Successfully cast vote for node ${vote.nodeId} on Supabase")
+            } else {
+                Log.e(TAG, "Failed to cast vote: ${response.errorBody()?.string()}")
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to push vote to Supabase: ${e.message}")
         }
@@ -175,8 +185,13 @@ class SupabaseSyncManager(
      */
     suspend fun deleteVote(nodeId: String, userId: String) = withContext(Dispatchers.IO) {
         try {
-            api.deleteVote(idFilter("eq.$nodeId"), idFilter("eq.$userId"))
-            Log.d(TAG, "Successfully removed vote for node $nodeId from Supabase")
+            val body = mapOf("p_node_id" to nodeId)
+            val response = api.removeVote(body)
+            if (response.isSuccessful) {
+                Log.d(TAG, "Successfully removed vote for node $nodeId from Supabase")
+            } else {
+                Log.e(TAG, "Failed to remove vote: ${response.errorBody()?.string()}")
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to remove vote from Supabase: ${e.message}")
         }

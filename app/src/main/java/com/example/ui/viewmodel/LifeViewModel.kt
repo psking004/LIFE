@@ -32,6 +32,12 @@ import kotlinx.coroutines.launch
 
 data class UiMessage(val message: String, val isError: Boolean = false)
 
+sealed class AdminStudentsUiState {
+    object Loading : AdminStudentsUiState()
+    data class Success(val students: List<User>) : AdminStudentsUiState()
+    data class Error(val message: String) : AdminStudentsUiState()
+}
+
 class LifeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: LifeRepository
@@ -65,6 +71,32 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
 
     val loginEvents: StateFlow<List<LoginEvent>> = repository.observeRecentSuccessfulLogins()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _adminStudentsState = MutableStateFlow<AdminStudentsUiState>(AdminStudentsUiState.Loading)
+    val adminStudentsState: StateFlow<AdminStudentsUiState> = _adminStudentsState.asStateFlow()
+
+    private val _adminStudents = MutableStateFlow<List<User>>(emptyList())
+    val adminStudents: StateFlow<List<User>> = _adminStudents.asStateFlow()
+
+    fun loadAdminStudents() {
+        viewModelScope.launch {
+            _adminStudentsState.value = AdminStudentsUiState.Loading
+            val authUser = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser
+            if (authUser == null) {
+                _adminStudentsState.value = AdminStudentsUiState.Error("Administrator login session required")
+                return@launch
+            }
+            val result = repository.getAdminStudents()
+            result.onSuccess { users ->
+                _adminStudents.value = users
+                _adminStudentsState.value = AdminStudentsUiState.Success(users)
+            }.onFailure { e ->
+                val errorMsg = e.message ?: "Failed to load students"
+                _adminStudentsState.value = AdminStudentsUiState.Error(errorMsg)
+                _uiMessages.emit(UiMessage(errorMsg, isError = true))
+            }
+        }
+    }
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
@@ -276,8 +308,18 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
     fun resendOtp() {
         val challenge = _activeOtpChallenge.value ?: return
         viewModelScope.launch {
+            _isLoggingIn.value = true
             _loginError.value = null
-            _uiMessages.emit(UiMessage("Verification code resent to ${challenge.maskedEmail}"))
+            val result = repository.resendEmailOtp(challenge)
+            _isLoggingIn.value = false
+            result.onSuccess { newChallenge ->
+                _activeOtpChallenge.value = newChallenge
+                _uiMessages.emit(UiMessage("Verification code resent to ${newChallenge.maskedEmail}"))
+            }.onFailure { e ->
+                val errorMsg = e.message ?: "Failed to resend code"
+                _loginError.value = errorMsg
+                _uiMessages.emit(UiMessage(errorMsg, isError = true))
+            }
         }
     }
 
@@ -432,6 +474,18 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateProfile(name: String? = null, phoneNumber: String? = null, department: String? = null) {
+        val user = currentUser.value ?: return
+        viewModelScope.launch {
+            val result = repository.updateProfile(user.id, name, phoneNumber, department)
+            result.onSuccess {
+                _uiMessages.emit(UiMessage("Profile updated successfully."))
+            }.onFailure { e ->
+                _uiMessages.emit(UiMessage(e.message ?: "Failed to update profile", isError = true))
+            }
+        }
+    }
+
     // --- Admin Actions ---
 
     fun createStudent(name: String, registerNumber: String, phoneNumber: String, department: String, email: String, initialPassword: String = "") {
@@ -448,7 +502,8 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
                 initialPassword = if (initialPassword.isBlank()) "pass123" else initialPassword
             )
             result.onSuccess {
-                _uiMessages.emit(UiMessage("Account for $registerNumber created (Pending Approval)"))
+                _uiMessages.emit(UiMessage("Student created successfully."))
+                loadAdminStudents()
             }.onFailure { e ->
                 _uiMessages.emit(UiMessage(e.message ?: "Failed to create account", isError = true))
             }
@@ -462,6 +517,7 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
             val result = repository.approveStudentAccount(admin.id, targetUserId)
             result.onSuccess {
                 _uiMessages.emit(UiMessage("Student account approved & activated"))
+                loadAdminStudents()
             }.onFailure { e ->
                 _uiMessages.emit(UiMessage(e.message ?: "Approval failed", isError = true))
             }
@@ -475,6 +531,7 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
             val result = repository.rejectStudentAccount(admin.id, targetUserId)
             result.onSuccess {
                 _uiMessages.emit(UiMessage("Student account rejected"))
+                loadAdminStudents()
             }.onFailure { e ->
                 _uiMessages.emit(UiMessage(e.message ?: "Rejection failed", isError = true))
             }
@@ -488,6 +545,7 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
             val result = repository.suspendStudentAccount(admin.id, targetUserId)
             result.onSuccess {
                 _uiMessages.emit(UiMessage("Student account suspended"))
+                loadAdminStudents()
             }.onFailure { e ->
                 _uiMessages.emit(UiMessage(e.message ?: "Suspension failed", isError = true))
             }
@@ -501,8 +559,23 @@ class LifeViewModel(application: Application) : AndroidViewModel(application) {
             val result = repository.restoreStudentAccount(admin.id, targetUserId)
             result.onSuccess {
                 _uiMessages.emit(UiMessage("Student account restored to Active"))
+                loadAdminStudents()
             }.onFailure { e ->
                 _uiMessages.emit(UiMessage(e.message ?: "Restoration failed", isError = true))
+            }
+        }
+    }
+
+    fun deleteStudent(targetUserId: String) {
+        val admin = currentUser.value
+        val adminId = admin?.id ?: "admin"
+        viewModelScope.launch {
+            val result = repository.deleteStudentUser(adminId, targetUserId)
+            if (result.isSuccess) {
+                _uiMessages.emit(UiMessage("Student account deleted permanently"))
+                loadAdminStudents()
+            } else {
+                _uiMessages.emit(UiMessage(result.exceptionOrNull()?.message ?: "Failed to delete account", true))
             }
         }
     }

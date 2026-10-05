@@ -82,14 +82,8 @@ fun LoginScreen(
     val scrollState = rememberScrollState()
 
     fun attemptLogin() {
-        Log.d("LIFE_REAL_LOGIN", "BUTTON_CLICKED")
         focusManager.clearFocus()
         val reg = registerNumber.trim().uppercase()
-        // Prevent demo identities from being entered via the UI
-        if (reg == "23CSE001" || reg == "23CSE002" || reg == "ADMIN01") {
-            validationError = "Please enter your Register Number"
-            return
-        }
         if (reg.isEmpty()) {
             validationError = "Please enter your Register Number"
             return
@@ -100,7 +94,6 @@ fun LoginScreen(
         }
         validationError = null
         onClearError()
-        Log.d("LIFE_REAL_LOGIN", "REGISTER_NUMBER_RECEIVED")
         onLoginSubmit(reg, password)
     }
 

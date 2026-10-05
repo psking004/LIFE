@@ -21,10 +21,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.ReportProblem
 import androidx.compose.material.icons.filled.WorkspacePremium
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -32,9 +34,15 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -64,13 +72,27 @@ fun ProfileScreen(
     onVoteToggle: (String) -> Unit,
     onOpenAdminPanel: () -> Unit,
     onLogout: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onEditProfile: ((name: String, phone: String, dept: String) -> Unit)? = null
 ) {
     if (user == null) {
         Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("Please login to view profile")
         }
         return
+    }
+
+    var showEditDialog by remember { mutableStateOf(false) }
+
+    if (showEditDialog) {
+        EditProfileDialog(
+            user = user,
+            onSave = { name, phone, dept ->
+                onEditProfile?.invoke(name, phone, dept)
+                showEditDialog = false
+            },
+            onDismiss = { showEditDialog = false }
+        )
     }
 
     Surface(
@@ -127,8 +149,13 @@ fun ProfileScreen(
                                 Spacer(modifier = Modifier.width(14.dp))
 
                                 Column {
+                                    val displayName = when {
+                                        user.name.isNotBlank() -> user.name
+                                        user.isAdmin -> "Administrator"
+                                        else -> user.registerNumber
+                                    }
                                     Text(
-                                        text = user.registerNumber,
+                                        text = displayName,
                                         style = MaterialTheme.typography.titleLarge.copy(
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 20.sp
@@ -137,7 +164,7 @@ fun ProfileScreen(
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
-                                        text = if (user.isAdmin) "Administrator Account" else "Student Innovator",
+                                        text = if (user.isAdmin) "Administrator Account" else "Student Innovator (${user.registerNumber})",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -165,7 +192,68 @@ fun ProfileScreen(
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(20.dp))
+                        if (user.department.isNotBlank() || user.phoneNumber.isNotBlank() || user.email.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        shape = RoundedCornerShape(12.dp)
+                                    )
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                if (user.department.isNotBlank()) {
+                                    Text(
+                                        text = "Department: ${user.department}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                if (user.phoneNumber.isNotBlank()) {
+                                    Text(
+                                        text = "Phone: ${user.phoneNumber}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                if (user.email.isNotBlank()) {
+                                    Text(
+                                        text = "Email: ${user.email}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        OutlinedButton(
+                            onClick = { showEditDialog = true },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(40.dp)
+                                .testTag("edit_profile_button"),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = GbPrimary),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, GbPrimary)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = GbPrimary
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Edit Profile",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
 
                         // Total Score Banner inside profile
                         Box(
@@ -432,4 +520,95 @@ fun ScoreCategoryCard(
             )
         }
     }
+}
+
+@Composable
+fun EditProfileDialog(
+    user: User,
+    onSave: (name: String, phone: String, dept: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var name by remember { mutableStateOf(user.name) }
+    var phoneNumber by remember { mutableStateOf(user.phoneNumber) }
+    var department by remember { mutableStateOf(user.department) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = if (user.isAdmin) "Edit Administrator Profile" else "Edit Profile",
+                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (!user.isAdmin && user.registerNumber.isNotBlank()) {
+                    Text(
+                        text = "Register Number: ${user.registerNumber}",
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (user.email.isNotBlank()) {
+                    Text(
+                        text = "Email: ${user.email}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Full Name") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("profile_name_input")
+                )
+
+                OutlinedTextField(
+                    value = phoneNumber,
+                    onValueChange = { phoneNumber = it },
+                    label = { Text("Phone Number") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("profile_phone_input")
+                )
+
+                OutlinedTextField(
+                    value = department,
+                    onValueChange = { department = it },
+                    label = { Text("Department") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("profile_dept_input")
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(name.trim(), phoneNumber.trim(), department.trim()) },
+                colors = ButtonDefaults.buttonColors(containerColor = GbPrimary),
+                modifier = Modifier.testTag("save_profile_button")
+            ) {
+                Text("Save", color = Color.White)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("cancel_edit_profile_button")
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
 }

@@ -43,8 +43,20 @@ interface UserDao {
     @Query("UPDATE users SET isSuspended = :isSuspended, accountStatus = CASE WHEN :isSuspended = 1 THEN 'SUSPENDED' ELSE 'ACTIVE' END WHERE id = :id")
     suspend fun setSuspended(id: String, isSuspended: Boolean)
 
+    @Query("UPDATE users SET isFirstLogin = :isFirstLogin WHERE id = :id")
+    suspend fun updateFirstLoginStatus(id: String, isFirstLogin: Boolean)
+
     // Password management is delegated to Firebase Auth; do not store password hashes locally.
 
     @Query("UPDATE users SET authUserId = :authUserId WHERE id = :id")
     suspend fun updateAuthUserId(id: String, authUserId: String)
+
+    @Query("DELETE FROM users WHERE id = :id")
+    suspend fun deleteUserById(id: String)
+
+    @Query("SELECT * FROM users WHERE authUserId = :authUserId LIMIT 1")
+    suspend fun getUserByAuthUserId(authUserId: String): UserEntity?
+
+    @Query("DELETE FROM users WHERE id = 'user_admin' OR (isAdmin = 1 AND id != :activeAdminId)")
+    suspend fun clearStaleAdminUsers(activeAdminId: String)
 }

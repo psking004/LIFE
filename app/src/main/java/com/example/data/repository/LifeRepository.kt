@@ -43,12 +43,7 @@ class LifeRepository(
     suspend fun initializeDatabase() = withContext(dispatcher) {
         // Ensure baseline demo and pilot users exist
         if (com.example.BuildConfig.DEBUG) {
-            for (user in SeedData.initialUsers) {
-                val existing = userDao.getUserByRegisterNumber(user.registerNumber)
-                if (existing == null) {
-                    userDao.insertUser(user)
-                }
-            }
+            userDao.deleteUserById("user_admin")
         }
         val existingProb = nodeDao.getNodeById(SeedData.nodeProblem1Id)
         if (existingProb == null) {
@@ -90,6 +85,10 @@ class LifeRepository(
         return authRepository.verifyEmailOtp(challenge, otpCode)
     }
 
+    suspend fun resendEmailOtp(challenge: EmailOtpChallenge): Result<EmailOtpChallenge> {
+        return authRepository.resendEmailOtp(challenge)
+    }
+
     suspend fun setupFirstLoginPassword(userId: String, newPassword: String): Result<Unit> {
         return authRepository.setupFirstLoginPassword(userId, newPassword)
     }
@@ -100,6 +99,99 @@ class LifeRepository(
 
     suspend fun logout() {
         authRepository.logout()
+    }
+
+    suspend fun getAdminStudents(): Result<List<User>> = withContext(dispatcher) {
+        val tag = "LIFE_ADMIN_DIAGNOSTIC"
+        try {
+            val firebaseUser = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser
+            if (firebaseUser == null) {
+                android.util.Log.e(tag, "getAdminStudents failed: FirebaseAuth.currentUser is null")
+                return@withContext Result.failure(IllegalStateException("Administrator session not found. Please log in again."))
+            }
+
+            val firebaseUid = firebaseUser.uid
+            android.util.Log.d(tag, "Acquiring fresh Firebase ID token for admin Firebase UID: $firebaseUid")
+
+            val tokenResult = try {
+                com.google.android.gms.tasks.Tasks.await(firebaseUser.getIdToken(true))
+            } catch (tokenEx: Exception) {
+                android.util.Log.e(tag, "getIdToken(true) exception: ${tokenEx.javaClass.simpleName}: ${tokenEx.message}")
+                return@withContext Result.failure(IllegalStateException("Failed to refresh admin credentials: ${tokenEx.message}"))
+            }
+
+            val freshToken = tokenResult?.token
+            if (freshToken.isNullOrBlank()) {
+                android.util.Log.e(tag, "getIdToken(true) returned null or empty token for UID: $firebaseUid")
+                return@withContext Result.failure(IllegalStateException("Admin authentication token is empty."))
+            }
+
+            com.example.data.remote.SupabaseClient.currentAccessToken.set(freshToken)
+
+            val supabaseApi = com.example.data.remote.SupabaseClient.restApi
+            val response = try {
+                supabaseApi.getUsersResponse()
+            } catch (httpEx: Exception) {
+                android.util.Log.e(tag, "GET /rest/v1/users threw exception: ${httpEx.javaClass.simpleName}: ${httpEx.message}", httpEx)
+                return@withContext Result.failure(httpEx)
+            }
+
+            val statusCode = response.code()
+            val isSuccess = response.isSuccessful
+            val rawError = if (!isSuccess) {
+                response.errorBody()?.string()?.take(500)
+            } else null
+
+            android.util.Log.d(tag, "GET /rest/v1/users response code: $statusCode for Firebase UID: $firebaseUid")
+            if (rawError != null) {
+                android.util.Log.e(tag, "GET /rest/v1/users error response body (sanitized): $rawError")
+            }
+
+            if (!isSuccess) {
+                val errorMsg = when (statusCode) {
+                    401 -> "Supabase authentication failed (HTTP 401). Token rejected by gateway."
+                    403 -> "Supabase authorization failed (HTTP 403). RLS denied admin read access."
+                    else -> "Unable to load students: HTTP $statusCode"
+                }
+                return@withContext Result.failure(IllegalStateException(errorMsg))
+            }
+
+            val dtoList = response.body() ?: emptyList()
+            android.util.Log.d(tag, "GET /rest/v1/users returned ${dtoList.size} records from Supabase")
+
+            val mapped = dtoList.mapNotNull { dto ->
+                val regNum = dto.registerNumber ?: return@mapNotNull null
+                val id = dto.id ?: return@mapNotNull null
+                val status = try {
+                    com.example.domain.model.AccountStatus.valueOf((dto.accountStatus ?: "ACTIVE").uppercase())
+                } catch (e: Exception) {
+                    if (dto.isSuspended == true) com.example.domain.model.AccountStatus.SUSPENDED else com.example.domain.model.AccountStatus.ACTIVE
+                }
+                User(
+                    id = id,
+                    authUserId = dto.authUserId,
+                    registerNumber = regNum,
+                    name = dto.name ?: if (dto.isAdmin == true) "Administrator" else "Student $regNum",
+                    phoneNumber = dto.phoneNumber ?: "",
+                    department = dto.department ?: "Computer Science & Engineering",
+                    email = dto.email ?: "",
+                    emailVerified = dto.emailVerified ?: false,
+                    accountStatus = status,
+                    isFirstLogin = dto.isFirstLogin ?: false,
+                    isSuspended = dto.isSuspended ?: (status == com.example.domain.model.AccountStatus.SUSPENDED),
+                    isAdmin = dto.isAdmin ?: false,
+                    createdAt = dto.createdAt ?: System.currentTimeMillis(),
+                    approvedAt = dto.approvedAt,
+                    approvedBy = dto.approvedBy
+                )
+            }
+
+            android.util.Log.d(tag, "Successfully mapped ${mapped.size} users to Domain model")
+            Result.success(mapped)
+        } catch (e: Exception) {
+            android.util.Log.e(tag, "getAdminStudents unexpected error: ${e.javaClass.simpleName}: ${e.message}", e)
+            Result.failure(e)
+        }
     }
 
     fun observeAllLoginEvents(): Flow<List<com.example.domain.model.LoginEvent>> = authRepository.observeAllLoginEvents()
@@ -687,5 +779,18 @@ class LifeRepository(
     suspend fun toggleUserSuspension(userId: String, suspend: Boolean): Result<Unit> = withContext(dispatcher) {
         userDao.setSuspended(userId, suspend)
         Result.success(Unit)
+    }
+
+    suspend fun deleteStudentUser(adminUserId: String, targetUserId: String): Result<Unit> {
+        return authRepository.deleteStudentAccount(adminUserId, targetUserId)
+    }
+
+    suspend fun updateProfile(
+        userId: String,
+        name: String? = null,
+        phoneNumber: String? = null,
+        department: String? = null
+    ): Result<User> {
+        return authRepository.updateProfile(userId, name, phoneNumber, department)
     }
 }

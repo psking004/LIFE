@@ -153,12 +153,17 @@ serve(async (req) => {
       });
 
       const authUserId = authCreated.uid;
-      const studentId = `user_${registerNumber.toLowerCase()}`;
 
-      const { error: insertUserError } = await supabaseAdmin
+      try {
+        await firebaseAuth.setCustomUserClaims(authUserId, { role: "authenticated" });
+      } catch (e: any) {
+        console.error("Failed to set custom claim on new user:", e.message);
+      }
+
+      const { data: insertedUser, error: insertUserError } = await supabaseAdmin
         .from("users")
         .insert({
-          id: studentId,
+          id: crypto.randomUUID(),
           auth_user_id: authUserId,
           register_number: registerNumber,
           name: name || `Student ${registerNumber}`,
@@ -169,16 +174,18 @@ serve(async (req) => {
           is_first_login: true,
           is_suspended: false,
           is_admin: false,
-          created_at: new Date().toISOString(),
+          created_at: Date.now(),
           approved_at: null,
           approved_by: null,
-        });
+        })
+        .select("id")
+        .single();
 
-      if (insertUserError) {
+      if (insertUserError || !insertedUser?.id) {
         await firebaseAuth.deleteUser(authUserId);
         return new Response(JSON.stringify({
           ok: false,
-          error: `Failed to save student profile: ${insertUserError.message}`,
+          error: `Failed to save student profile: ${insertUserError?.message || "Unknown error"}`,
         }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -187,7 +194,8 @@ serve(async (req) => {
 
       return new Response(JSON.stringify({
         ok: true,
-        user_id: studentId,
+        user_id: insertedUser.id,
+        auth_user_id: authUserId,
         register_number: registerNumber,
       }), {
         status: 200,
@@ -244,20 +252,50 @@ serve(async (req) => {
         });
       }
 
+      if (targetUserId === adminRecord.id || targetUserId === firebaseUid) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: "Administrators cannot change their own account status.",
+        }), {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const { data: targetUser } = await supabaseAdmin
+        .from("users")
+        .select("id, auth_user_id, register_number, is_admin")
+        .or(`id.eq.${targetUserId},auth_user_id.eq.${targetUserId}`)
+        .maybeSingle();
+
+      if (!targetUser) {
+        return new Response(JSON.stringify({ ok: false, error: "Target student not found." }), {
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      if (targetUser.is_admin) {
+        return new Response(JSON.stringify({ ok: false, error: "Cannot modify status of another administrator." }), {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
       const updates: Record<string, any> = {
         account_status: newStatus,
         is_suspended: newStatus === "SUSPENDED",
       };
 
       if (newStatus === "ACTIVE") {
-        updates.approved_at = new Date().toISOString();
-        updates.approved_by = adminRecord.register_number;
+        updates.approved_at = Date.now();
+        updates.approved_by = adminRecord.id;
       }
 
       const { error: updateError } = await supabaseAdmin
         .from("users")
         .update(updates)
-        .eq("id", targetUserId);
+        .eq("id", targetUser.id);
 
       if (updateError) {
         return new Response(JSON.stringify({ ok: false, error: updateError.message }), {
@@ -317,12 +355,80 @@ serve(async (req) => {
       });
     }
 
+    if (action === "delete_student") {
+      const targetUserId = body.target_user_id;
+
+      if (!targetUserId) {
+        return new Response(JSON.stringify({ ok: false, error: "Target user ID required." }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      if (targetUserId === adminRecord.id || targetUserId === firebaseUid) {
+        return new Response(JSON.stringify({ ok: false, error: "Administrators cannot delete their own accounts." }), {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const { data: targetUser } = await supabaseAdmin
+        .from("users")
+        .select("id, auth_user_id, is_admin")
+        .or(`id.eq.${targetUserId},auth_user_id.eq.${targetUserId}`)
+        .maybeSingle();
+
+      if (!targetUser) {
+        return new Response(JSON.stringify({ ok: false, error: "Student not found in database." }), {
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      if (targetUser.is_admin) {
+        return new Response(JSON.stringify({ ok: false, error: "Cannot delete another administrator." }), {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const { error: deleteError } = await supabaseAdmin
+        .from("users")
+        .delete()
+        .eq("id", targetUser.id);
+
+      if (deleteError) {
+        let msg = deleteError.message;
+        if (msg.includes("violates foreign key constraint") && msg.includes("idea_nodes")) {
+          msg = "Cannot delete student because they have authored ideas. Their account must be preserved to maintain the evolution tree.";
+        }
+        return new Response(JSON.stringify({ ok: false, error: msg }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      if (targetUser.auth_user_id) {
+        try {
+          await firebaseAuth.deleteUser(targetUser.auth_user_id);
+        } catch (e: any) {
+          console.error("Failed to delete Firebase identity:", e);
+        }
+      }
+
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     return new Response(JSON.stringify({ ok: false, error: "Unknown action" }), {
       status: 400,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-  } catch (err) {
-    return new Response(JSON.stringify({ ok: false, error: "Internal server error" }), {
+  } catch (err: any) {
+    console.error("admin-manage-user unhandled error:", err?.message ?? err);
+    return new Response(JSON.stringify({ ok: false, error: err?.message ?? "Internal server error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

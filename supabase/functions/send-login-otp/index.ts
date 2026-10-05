@@ -91,13 +91,28 @@ serve(async (req) => {
     }
 
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
-    const { data: userRecord, error: userError } = await supabaseAdmin
+    let { data: userRecord, error: userError } = await supabaseAdmin
       .from("users")
       .select("id, register_number, email, name, account_status, is_suspended, is_admin, otp_verified_until")
       .eq("auth_user_id", firebaseUid)
       .maybeSingle();
 
-    if (userError || !userRecord) {
+    if (!userRecord && decodedToken.email) {
+      const emailStr = decodedToken.email.toLowerCase();
+      const { data: emailUser } = await supabaseAdmin
+        .from("users")
+        .select("id, register_number, email, name, account_status, is_suspended, is_admin, otp_verified_until, auth_user_id")
+        .ilike("email", emailStr)
+        .maybeSingle();
+        
+      if (emailUser) {
+        await supabaseAdmin.from("users").update({ auth_user_id: firebaseUid }).eq("id", emailUser.id);
+        userRecord = emailUser;
+      }
+    }
+
+    if (!userRecord) {
+      console.error("send-login-otp: user not found for firebaseUid:", firebaseUid);
       return new Response(JSON.stringify({ ok: false, error: "Student profile not found" }), {
         status: 403,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -137,11 +152,11 @@ serve(async (req) => {
     }
 
     const oneMinAgo = new Date(Date.now() - 60 * 1000).toISOString();
-    const { data: recentOtps } = await supabaseAdmin
+    const { data: recentOtps, error: checkError } = await supabaseAdmin
       .from("login_otps")
       .select("id, created_at")
       .eq("user_id", userRecord.id)
-      .eq("is_used", false)
+      .is("used_at", null)
       .gt("created_at", oneMinAgo)
       .limit(1);
 
@@ -155,11 +170,12 @@ serve(async (req) => {
       });
     }
 
+    // Invalidate previous unused OTPs
     await supabaseAdmin
       .from("login_otps")
-      .update({ is_used: true })
+      .update({ used_at: new Date().toISOString() })
       .eq("user_id", userRecord.id)
-      .eq("is_used", false);
+      .is("used_at", null);
 
     const otpNumber = crypto.getRandomValues(new Uint32Array(1))[0] % 900000 + 100000;
     const otpStr = String(otpNumber).padStart(6, "0");
@@ -177,13 +193,14 @@ serve(async (req) => {
     const { error: insertOtpError } = await supabaseAdmin.from("login_otps").insert({
       user_id: userRecord.id,
       otp_hash: otpHash,
+      purpose: "LOGIN",
       attempts: 0,
-      max_attempts: 5,
-      is_used: false,
       expires_at: expiresAt,
+      created_at: new Date().toISOString(),
     });
 
     if (insertOtpError) {
+      console.error("send-login-otp: insert login_otps error:", insertOtpError);
       return new Response(JSON.stringify({ ok: false, error: "Failed to initiate verification" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -223,9 +240,12 @@ serve(async (req) => {
         });
 
         if (!brevoResp.ok) {
+          const errText = await brevoResp.text().catch(() => "");
+          console.error("send-login-otp: Brevo delivery failed:", brevoResp.status, errText);
           throw new Error("Brevo delivery failed");
         }
-      } catch (_err) {
+      } catch (brevoErr: any) {
+        console.error("send-login-otp: Brevo email sending error:", brevoErr?.message ?? brevoErr);
         return new Response(JSON.stringify({ ok: false, error: "Failed to send verification email" }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -242,13 +262,10 @@ serve(async (req) => {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-  } catch (err) {
-    const message = err instanceof Error && err.message === "Missing Firebase admin configuration"
-      ? "Firebase server configuration is missing"
-      : "Internal server error";
-
-    return new Response(JSON.stringify({ ok: false, error: message }), {
-      status: err instanceof Error && err.message === "Missing Firebase admin configuration" ? 500 : 500,
+  } catch (err: any) {
+    console.error("send-login-otp unhandled error:", err?.message ?? err);
+    return new Response(JSON.stringify({ ok: false, error: err?.message ?? "Internal server error" }), {
+      status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }

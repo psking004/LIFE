@@ -3,7 +3,7 @@ project_id = "khjkbfkfucsdheeyvcar"
 
 [api]
 port = 54321
-schemas = ["public", "storage", "graphql_public"]
+schemas = ["public", "graphql_public"]
 extra_search_path = ["public", "extensions"]
 max_rows = 1000
 
@@ -21,3 +21,23 @@ verify_jwt = false
 
 [functions.self-signup]
 verify_jwt = false
+
+[auth]
+additional_redirect_urls = []
+site_url = "http://localhost:3000"
+
+[auth.email]
+enable_confirmations = true
+max_frequency = "1m0s"
+otp_length = 8
+
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
+[db.pooler]
+default_pool_size = 15
+max_client_conn = 200
+
+[storage.vector]
+enabled = false

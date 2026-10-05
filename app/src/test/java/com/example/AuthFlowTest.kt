@@ -22,6 +22,14 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import io.mockk.mockkStatic
+import io.mockk.unmockkAll
+import io.mockk.every
+import io.mockk.mockk
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseUser
+import com.google.firebase.auth.AuthResult
+import com.google.android.gms.tasks.Task
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -132,11 +140,38 @@ class AuthFlowTest {
             .allowMainThreadQueries()
             .build()
         sessionManager = AuthSessionManager(context)
+
+        val fakeFirebaseAuthProvider = object : com.example.data.repository.FirebaseAuthProvider {
+            override suspend fun signInWithEmailAndPassword(email: String, password: String): String {
+                if (password != "pass123" && password != "admin123" && password != "student123" && password != "welcome") {
+                    throw com.google.firebase.auth.FirebaseAuthInvalidCredentialsException("AUTH_INVALID_CREDENTIALS", "Invalid")
+                }
+                if (email == "blocked@campus.edu") {
+                    throw com.google.firebase.auth.FirebaseAuthException("ERROR_USER_DISABLED", "Disabled")
+                }
+                if (email.startsWith("admin")) return "user_admin01"
+                return "user_" + email.substringBefore("@").lowercase()
+            }
+            override fun getCurrentUid(): String? {
+                return kotlinx.coroutines.runBlocking { sessionManager.getSession()?.userId }
+            }
+            override suspend fun getFreshAdminToken(): String? {
+                return "fake_admin_token"
+            }
+            override suspend fun updatePassword(newPassword: String) {
+                // Fake successful password update
+            }
+            override fun signOut() {
+                // Fake sign out
+            }
+        }
+
         authRepository = AuthRepository(
             userDao = database.userDao(),
             loginEventDao = database.loginEventDao(),
             sessionManager = sessionManager,
-            authApi = mockAuthApi
+            authApi = mockAuthApi,
+            firebaseAuthProvider = fakeFirebaseAuthProvider
         )
         repository = LifeRepository(database, sessionManager)
 
@@ -155,6 +190,7 @@ class AuthFlowTest {
             sessionManager.clearSession()
         }
         database.close()
+        unmockkAll()
     }
 
     @Test
@@ -179,6 +215,9 @@ class AuthFlowTest {
         // Let's modify the mock in the test if needed, or change the mock to return false by default.
         // But since we want to keep it simple, we'll just check if it returns Authenticated since the mock is set to alreadyVerifiedToday = true.
         val loginRes = authRepository.login("23CSE042", "student123")
+        if (loginRes.isFailure) {
+            println("LOGIN FAILED: ${loginRes.exceptionOrNull()?.message}")
+        }
         assertTrue(loginRes.isSuccess)
         val step = loginRes.getOrThrow()
         assertTrue(step is com.example.data.repository.LoginStep.Authenticated)
@@ -227,15 +266,18 @@ class AuthFlowTest {
     fun `pending account is blocked from login until approved by admin`() = runTest {
         // 23CSE099 is initially PENDING
         val pendingUserRes = authRepository.login("23CSE099", "welcome")
+        if (pendingUserRes.isSuccess) println("PENDING ACCOUNT: PENDING RESULT SUCCESS")
         assertTrue(pendingUserRes.isFailure)
         assertTrue(pendingUserRes.exceptionOrNull()?.message?.contains("awaiting") == true)
 
         // Admin approves account
         val approveRes = authRepository.approveStudentAccount("user_admin", "user_new_student")
+        if (approveRes.isFailure) println("PENDING ACCOUNT: APPROVE FAILURE ${approveRes.exceptionOrNull()?.message}")
         assertTrue(approveRes.isSuccess)
 
         // Now login succeeds
         val retryRes = authRepository.login("23CSE099", "welcome")
+        if (retryRes.isFailure) println("PENDING ACCOUNT: LOGIN FAILURE AFTER APPROVE ${retryRes.exceptionOrNull()?.message}")
         assertTrue(retryRes.isSuccess)
     }
 
@@ -253,6 +295,7 @@ class AuthFlowTest {
         authRepository.approveStudentAccount("user_admin", "user_new_student")
 
         val loginResult = authRepository.login("23CSE099", "welcome")
+        if (loginResult.isFailure) println("FIRST LOGIN: LOGIN FAILURE: ${loginResult.exceptionOrNull()?.message}")
         assertTrue(loginResult.isSuccess)
         val step = loginResult.getOrThrow()
         assertTrue(step is com.example.data.repository.LoginStep.Authenticated)
@@ -317,6 +360,7 @@ class AuthFlowTest {
     @Test
     fun `direct login with pending account fails until approved`() = runTest {
         val pendingResult = authRepository.login("23CSE099", "welcome")
+        if (pendingResult.isSuccess) println("PENDING RESULT WAS SUCCESS")
         assertTrue(pendingResult.isFailure)
         assertTrue(pendingResult.exceptionOrNull()?.message?.contains("awaiting") == true)
 
@@ -325,6 +369,7 @@ class AuthFlowTest {
 
         // Now login succeeds
         val approvedResult = authRepository.login("23CSE099", "welcome")
+        if (approvedResult.isFailure) println("APPROVED RESULT WAS FAILURE: ${approvedResult.exceptionOrNull()?.message}")
         assertTrue(approvedResult.isSuccess)
     }
 

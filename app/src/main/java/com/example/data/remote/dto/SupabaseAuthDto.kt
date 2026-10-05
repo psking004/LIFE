@@ -73,6 +73,7 @@ data class ResolveLoginIdentityResponse(
 data class AdminManageUserResponse(
     @param:Json(name = "ok") val ok: Boolean = false,
     @param:Json(name = "user_id") val userId: String? = null,
+    @param:Json(name = "auth_user_id") val authUserId: String? = null,
     @param:Json(name = "register_number") val registerNumber: String? = null,
     @param:Json(name = "error") val error: String? = null
 )

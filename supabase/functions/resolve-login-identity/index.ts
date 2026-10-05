@@ -1,32 +1,10 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.8";
-import { cert, getApps, initializeApp } from "npm:firebase-admin/app";
-import { getAuth } from "npm:firebase-admin/auth";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
-
-function ensureFirebaseAdmin() {
-  if (getApps().length === 0) {
-    const projectId = Deno.env.get("FIREBASE_PROJECT_ID") ?? "";
-    const clientEmail = Deno.env.get("FIREBASE_CLIENT_EMAIL") ?? "";
-    const privateKey = Deno.env.get("FIREBASE_PRIVATE_KEY") ?? "";
-
-    if (!projectId || !clientEmail || !privateKey) {
-      throw new Error("Missing Firebase admin configuration");
-    }
-
-    initializeApp({
-      credential: cert({
-        projectId,
-        clientEmail,
-        privateKey: privateKey.replace(/\\n/g, "\n"),
-      }),
-    });
-  }
-}
 
 function maskEmail(email: string): string {
   const trimmed = (email || "").trim();
@@ -51,22 +29,6 @@ serve(async (req) => {
   }
 
   try {
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return new Response(JSON.stringify({ ok: false, error: "Missing authorization token" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const token = authHeader.replace("Bearer ", "").trim();
-    if (!token) {
-      return new Response(JSON.stringify({ ok: false, error: "Missing Firebase ID token" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
     const body = await req.json().catch(() => ({}));
     const rawReg = (body.register_number ?? body.p_register_number ?? "").toString().trim();
     const cleanReg = rawReg.toUpperCase();
@@ -88,62 +50,65 @@ serve(async (req) => {
       });
     }
 
-    ensureFirebaseAdmin();
-    const firebaseAuth = getAuth(getApps()[0]);
-    const decodedToken = await firebaseAuth.verifyIdToken(token);
-    const firebaseUid = decodedToken.uid;
-    if (!firebaseUid) {
-      return new Response(JSON.stringify({ ok: false, error: "Invalid Firebase token" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
-    const { data: callerUser, error: callerError } = await supabaseAdmin
-      .from("users")
-      .select("id, auth_user_id, account_status, is_suspended, is_admin")
-      .eq("auth_user_id", firebaseUid)
-      .maybeSingle();
-
-    if (callerError || !callerUser || callerUser.account_status !== "ACTIVE" || callerUser.is_suspended) {
-      return new Response(JSON.stringify({ ok: false, error: "Unauthorized" }), {
-        status: 403,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
+    
     const { data: userRecord, error: userError } = await supabaseAdmin
       .from("users")
       .select("id, auth_user_id, register_number, email, account_status, is_suspended, is_admin")
       .ilike("register_number", cleanReg)
       .maybeSingle();
 
-    if (userError || !userRecord || userRecord.account_status !== "ACTIVE" || userRecord.is_suspended) {
-      return new Response(JSON.stringify({ ok: false, error: "Invalid Register Number or Password" }), {
-        status: 400,
+    if (userError || !userRecord) {
+      return new Response(JSON.stringify({ ok: false, error: "Account Not Found: We couldn't find a LIFE account with this register number." }), {
+        status: 404,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    if (userRecord.id !== callerUser.id && !callerUser.is_admin) {
-      return new Response(JSON.stringify({ ok: false, error: "Unauthorized" }), {
+    if (userRecord.account_status === "PENDING") {
+      return new Response(JSON.stringify({ ok: false, status: "PENDING", error: "Your account is awaiting administrator approval." }), {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (userRecord.account_status === "SUSPENDED" || userRecord.is_suspended) {
+      return new Response(JSON.stringify({ ok: false, status: "SUSPENDED", error: "Your account has been suspended. Contact the administrator." }), {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (userRecord.account_status === "REJECTED") {
+      return new Response(JSON.stringify({ ok: false, status: "REJECTED", error: "Your account is not authorized." }), {
         status: 403,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const email = (userRecord.email || "").trim();
+    if (!email) {
+      return new Response(JSON.stringify({ ok: false, error: "Identity resolution failed: no registered email found for this account." }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     return new Response(JSON.stringify({
       ok: true,
+      user_id: userRecord.id,
+      register_number: userRecord.register_number,
       auth_email: email,
       masked_email: maskEmail(email),
+      status: userRecord.account_status,
+      is_admin: userRecord.is_admin
     }), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-  } catch (err) {
-    return new Response(JSON.stringify({ ok: false, error: "Internal server error" }), {
+  } catch (err: any) {
+    console.error("resolve-login-identity error:", err?.message ?? err);
+    return new Response(JSON.stringify({ ok: false, error: err?.message ?? "Internal server error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

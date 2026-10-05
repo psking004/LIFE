@@ -34,7 +34,7 @@ data class UserEntity(
         return User(
             id = id,
             authUserId = authUserId,
-            registerNumber = registerNumber,
+            registerNumber = registerNumber.ifEmpty { if (isAdmin) "ADMIN" else "" },
             name = name.ifEmpty { if (isAdmin) "Administrator" else "Student $registerNumber" },
             phoneNumber = phoneNumber.ifEmpty { "9876541234" },
             department = department.ifEmpty { "Computer Science & Engineering" },

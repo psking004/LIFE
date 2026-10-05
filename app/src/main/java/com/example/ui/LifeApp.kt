@@ -228,7 +228,7 @@ fun LifeApp(
                 selectedTab == LifeNavigationTab.PROBLEMS -> "LIFE - Problems"
                 selectedTab == LifeNavigationTab.IMPROVEMENTS -> "LIFE - Improvements"
                 selectedTab == LifeNavigationTab.LEADERBOARD -> "Leaderboard"
-                selectedTab == LifeNavigationTab.PROFILE -> "Student Profile"
+                selectedTab == LifeNavigationTab.PROFILE -> if (activeUser?.isAdmin == true) "Administrator Profile" else "Student Profile"
                 else -> "LIFE"
             }
 
@@ -378,7 +378,10 @@ fun LifeApp(
                                 onNodeClick = { id -> viewModel.onSelectNode(id) },
                                 onVoteToggle = { id -> viewModel.toggleVote(id) },
                                 onOpenAdminPanel = { showAdminDialog = true },
-                                onLogout = { viewModel.logout() }
+                                onLogout = { viewModel.logout() },
+                                onEditProfile = { name, phone, dept ->
+                                    viewModel.updateProfile(name, phone, dept)
+                                }
                             )
                         }
                     }
@@ -387,9 +390,18 @@ fun LifeApp(
 
             // Dialogs
             if (showAdminDialog) {
+                LaunchedEffect(Unit) {
+                    viewModel.loadAdminStudents()
+                }
+                
+                val adminStudentsState by viewModel.adminStudentsState.collectAsState()
+                val adminStudents by viewModel.adminStudents.collectAsState()
+                
                 AdminManagementDialog(
-                    users = allUsers,
+                    users = adminStudents,
+                    uiState = adminStudentsState,
                     loginEvents = loginEvents,
+                    onRetry = { viewModel.loadAdminStudents() },
                     onCreateStudent = { name, reg, phone, dept, email, password ->
                         viewModel.createStudent(name, reg, phone, dept, email, password)
                     },
@@ -404,6 +416,9 @@ fun LifeApp(
                     },
                     onRestoreStudent = { id ->
                         viewModel.restoreStudent(id)
+                    },
+                    onDeleteStudent = { id ->
+                        viewModel.deleteStudent(id)
                     },
                     onDismiss = { showAdminDialog = false }
                 )

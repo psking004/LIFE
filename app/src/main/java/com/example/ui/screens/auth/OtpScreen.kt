@@ -3,6 +3,7 @@ package com.example.ui.screens.auth
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,14 +17,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.Pin
-import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -32,9 +33,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -47,6 +45,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
@@ -73,7 +74,8 @@ fun OtpScreen(
 ) {
     var otpCode by remember { mutableStateOf("") }
     var validationError by remember { mutableStateOf<String?>(null) }
-    var countdownSeconds by remember { mutableIntStateOf(45) }
+    var countdownSeconds by remember { mutableIntStateOf(60) }
+    val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val scrollState = rememberScrollState()
 
@@ -83,6 +85,13 @@ fun OtpScreen(
             delay(1000L)
             countdownSeconds -= 1
         }
+    }
+
+    LaunchedEffect(Unit) {
+        delay(300)
+        try {
+            focusRequester.requestFocus()
+        } catch (_: Exception) {}
     }
 
     fun attemptVerify() {
@@ -111,7 +120,7 @@ fun OtpScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // Back button
+            // Top Navigation Bar
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.Start
@@ -128,14 +137,14 @@ fun OtpScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             // Logo Header
-            LifeLogo(size = 48.dp, showTagline = true, fontSize = 24)
+            LifeLogo(size = 52.dp, showTagline = true, fontSize = 26)
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(28.dp))
 
-            // OTP Verification Card
+            // Dedicated OTP Verification Card
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -144,48 +153,48 @@ fun OtpScreen(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                 border = CardDefaults.outlinedCardBorder().copy(
-                    brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.outline)
+                    brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.outlineVariant)
                 )
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(24.dp),
+                        .padding(28.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(56.dp)
-                            .background(GbPrimary.copy(alpha = 0.12f), RoundedCornerShape(16.dp)),
+                            .size(60.dp)
+                            .background(GbPrimary.copy(alpha = 0.12f), RoundedCornerShape(18.dp)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Security,
-                            contentDescription = null,
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "Verification Security",
                             tint = GbPrimary,
-                            modifier = Modifier.size(28.dp)
+                            modifier = Modifier.size(30.dp)
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(18.dp))
 
                     Text(
-                        text = "Verify your email",
+                        text = "Verify your login",
                         style = MaterialTheme.typography.titleLarge.copy(
                             fontWeight = FontWeight.Bold,
-                            fontSize = 20.sp
+                            fontSize = 22.sp
                         ),
                         color = MaterialTheme.colorScheme.onSurface
                     )
 
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     Text(
-                        text = "Enter the 6-digit verification code sent to your registered email.",
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            fontSize = 13.sp
+                        text = "We've sent a 6-digit verification code to",
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontSize = 14.sp
                         ),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
@@ -194,7 +203,7 @@ fun OtpScreen(
                     Spacer(modifier = Modifier.height(4.dp))
 
                     Text(
-                        text = maskedEmail,
+                        text = maskedEmail.ifBlank { "your registered email" },
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp
@@ -203,77 +212,121 @@ fun OtpScreen(
                         modifier = Modifier.testTag("otp_masked_phone")
                     )
 
-                    Spacer(modifier = Modifier.height(24.dp))
+                    Spacer(modifier = Modifier.height(28.dp))
 
-                    // 6-digit OTP Input
-                    OutlinedTextField(
-                        value = otpCode,
-                        onValueChange = { input ->
-                            val filtered = input.filter { it.isDigit() }.take(6)
-                            otpCode = filtered
-                            validationError = null
-                            if (filtered.length == 6) {
-                                focusManager.clearFocus()
-                            }
-                        },
+                    // 6 Individual OTP Digit Boxes with hidden BasicTextField overlay
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("otp_input"),
-                        label = { Text("6-Digit OTP") },
-                        placeholder = { Text("• • • • • •") },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.Pin,
-                                contentDescription = null,
-                                tint = GbPrimary
-                            )
-                        },
-                        shape = RoundedCornerShape(16.dp),
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.NumberPassword,
-                            imeAction = ImeAction.Done
-                        ),
-                        keyboardActions = KeyboardActions(onDone = { attemptVerify() }),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = GbPrimary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                focusRequester.requestFocus()
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        BasicTextField(
+                            value = otpCode,
+                            onValueChange = { input ->
+                                val filtered = input.filter { it.isDigit() }.take(6)
+                                otpCode = filtered
+                                validationError = null
+                                onClearError()
+                                if (filtered.length == 6) {
+                                    focusManager.clearFocus()
+                                }
+                            },
+                            modifier = Modifier
+                                .focusRequester(focusRequester)
+                                .testTag("otp_input"),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.NumberPassword,
+                                imeAction = ImeAction.Done
+                            ),
+                            keyboardActions = KeyboardActions(onDone = { attemptVerify() }),
+                            decorationBox = {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    for (i in 0 until 6) {
+                                        val digit = otpCode.getOrNull(i)?.toString() ?: ""
+                                        val isFocused = otpCode.length == i || (otpCode.length == 6 && i == 5)
+                                        val isError = (serverError != null || validationError != null)
+
+                                        Box(
+                                            modifier = Modifier
+                                                .width(44.dp)
+                                                .height(54.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(
+                                                    if (isFocused) GbPrimary.copy(alpha = 0.05f)
+                                                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                                )
+                                                .border(
+                                                    width = if (isFocused) 2.dp else 1.dp,
+                                                    color = when {
+                                                        isError -> MaterialTheme.colorScheme.error
+                                                        isFocused -> GbPrimary
+                                                        digit.isNotEmpty() -> GbPrimary.copy(alpha = 0.6f)
+                                                        else -> MaterialTheme.colorScheme.outlineVariant
+                                                    },
+                                                    shape = RoundedCornerShape(12.dp)
+                                                ),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = digit,
+                                                style = MaterialTheme.typography.titleLarge.copy(
+                                                    fontSize = 22.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    textAlign = TextAlign.Center
+                                                ),
+                                                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         )
-                    )
+                    }
 
                     val displayedError = serverError ?: validationError
                     if (displayedError != null) {
-                        Spacer(modifier = Modifier.height(14.dp))
+                        Spacer(modifier = Modifier.height(18.dp))
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("otp_error_banner"),
-                            shape = RoundedCornerShape(12.dp),
+                            shape = RoundedCornerShape(14.dp),
                             colors = CardDefaults.cardColors(
                                 containerColor = MaterialTheme.colorScheme.errorContainer
                             ),
                             border = CardDefaults.outlinedCardBorder().copy(
-                                brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.error)
+                                brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.error.copy(alpha = 0.4f))
                             )
                         ) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(12.dp),
+                                    .padding(14.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.ErrorOutline,
                                     contentDescription = "Error",
                                     tint = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(22.dp)
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
                                 Text(
                                     text = displayedError,
                                     style = MaterialTheme.typography.bodySmall.copy(
                                         color = MaterialTheme.colorScheme.onErrorContainer,
-                                        fontWeight = FontWeight.SemiBold
+                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 13.sp
                                     ),
                                     modifier = Modifier.testTag("otp_error_text")
                                 )
@@ -281,7 +334,7 @@ fun OtpScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(24.dp))
+                    Spacer(modifier = Modifier.height(26.dp))
 
                     // Verify OTP Button
                     Button(
@@ -303,7 +356,7 @@ fun OtpScreen(
                                 color = Color.White,
                                 strokeWidth = 2.5.dp
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
                             Text(
                                 text = "Verifying...",
                                 style = MaterialTheme.typography.titleMedium.copy(
@@ -322,22 +375,28 @@ fun OtpScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(18.dp))
 
-                    // Resend OTP / Countdown
+                    // Resend OTP / Countdown (e.g. Resend OTP in 00:42)
                     if (countdownSeconds > 0) {
+                        val minutes = countdownSeconds / 60
+                        val seconds = countdownSeconds % 60
+                        val formattedTime = String.format("%02d:%02d", minutes, seconds)
                         Text(
-                            text = "Resend OTP in ${countdownSeconds}s",
+                            text = "Resend OTP in $formattedTime",
                             style = MaterialTheme.typography.bodySmall.copy(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontWeight = FontWeight.Medium
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 13.sp
                             ),
                             modifier = Modifier.testTag("otp_countdown_text")
                         )
                     } else {
                         TextButton(
                             onClick = {
-                                countdownSeconds = 45
+                                countdownSeconds = 60
+                                validationError = null
+                                onClearError()
                                 onResendOtp()
                             },
                             modifier = Modifier.testTag("resend_otp_button")
@@ -346,7 +405,8 @@ fun OtpScreen(
                                 text = "Resend OTP",
                                 style = MaterialTheme.typography.bodyMedium.copy(
                                     fontWeight = FontWeight.Bold,
-                                    color = GbPrimary
+                                    color = GbPrimary,
+                                    fontSize = 14.sp
                                 )
                             )
                         }
