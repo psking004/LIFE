@@ -1,0 +1,7 @@
+# Copy this file to local.properties (which is gitignored) and fill in real values.
+# Android Studio adds sdk.dir automatically.
+# sdk.dir=/path/to/Android/Sdk
+
+# Supabase: Dashboard > Project Settings > API
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_ANON_KEY=your_supabase_anon_key_here

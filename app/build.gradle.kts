@@ -63,11 +63,13 @@ android {
   }
 }
 
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-// to match the convention used in Web projects.
+// The Secrets Gradle Plugin turns keys in local.properties (gitignored) into BuildConfig
+// fields, e.g. BuildConfig.SUPABASE_URL and BuildConfig.SUPABASE_ANON_KEY.
+// local.properties.example supplies blank defaults so a fresh clone still compiles;
+// the app then fails fast at runtime with a clear "not configured" error.
 secrets {
-  propertiesFileName = ".env"
-  defaultPropertiesFileName = ".env.example"
+  propertiesFileName = "local.properties"
+  defaultPropertiesFileName = "local.properties.example"
   ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
 }
 

@@ -1,14 +1,14 @@
 # Firebase Admin Account
-The first real admin account for LIFE has been successfully created in Firebase Auth.
-- **Email**: `lifeadminace@gmail.com`
+The first real admin account for LIFE has been created in Firebase Auth. (Identifiers are intentionally omitted from this public repo.)
+- **Email**: `<admin email>`
 - **Name**: ADMIN
-- **UID**: `8XV5kBLSNuch4v8MMtAgTuH5MFa2`
+- **UID**: `<admin Firebase UID>`
 - **Password**: [REDACTED FOR SECURITY]
 
 # LIFE Admin Profile
 A corresponding row was securely inserted into the Supabase `public.users` table:
-- `auth_user_id`: `8XV5kBLSNuch4v8MMtAgTuH5MFa2`
-- `email`: `lifeadminace@gmail.com`
+- `auth_user_id`: `<admin Firebase UID>`
+- `email`: `<admin email>`
 - `name`: ADMIN
 - `account_status`: `ACTIVE`
 - `is_admin`: `true`
@@ -33,4 +33,4 @@ In the same test script, we logged in as a standard student user (`test0011@exam
 - **RLS Integrity Maintained**: We did not modify or weaken RLS policies; we respected the existing security structure.
 
 # Result
-The `lifeadminace@gmail.com` admin account is now fully functional! You can immediately use these credentials to log into the Admin Login screen on your physical Android device.
+The admin account is now fully functional! You can immediately use these credentials to log into the Admin Login screen on your physical Android device.

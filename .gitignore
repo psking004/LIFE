@@ -16,3 +16,34 @@
 local.properties
 .env
 debug.keystore
+
+# Secrets / environment config (never commit)
+local.properties
+.env
+.env.*
+!.env.example
+google-services.json
+**/google-services.json
+GoogleService-Info.plist
+*.jks
+*.keystore
+service-account*.json
+*-firebase-adminsdk-*.json
+
+# Database dumps (migrations under supabase/migrations/ stay tracked)
+dump*.sql
+*.dump
+*-dump.sql
+backup*.sql
+
+# Logs
+*.log
+login-log*.txt
+logcat*.txt
+
+# Node
+node_modules/
+
+# Supabase CLI local state
+supabase/.temp/
+supabase/.branches/
