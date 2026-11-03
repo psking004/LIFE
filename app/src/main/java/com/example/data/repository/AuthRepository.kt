@@ -235,9 +235,11 @@ class AuthRepository(
                 return@withContext false
             }
             
-            // Note: For a regular user token, we should probably add a method to FirebaseAuthProvider
-            // but for tests/simple refresh, we can try to use getFreshAdminToken (or just fake it)
-            val newToken = firebaseAuthProvider.getFreshAdminToken() ?: "fake_token_refresh"
+            // Force-refresh the signed-in user's Firebase ID token. If Firebase cannot issue
+            // one, fail loudly instead of storing a fake token (the catch block below logs the
+            // user out once the current token has actually expired).
+            val newToken = firebaseAuthProvider.getFreshAdminToken()
+                ?: throw IllegalStateException("Firebase did not return a fresh ID token")
             
             val expiresInSeconds = 3600L
             sessionManager.updateTokens(newToken, session.refreshToken, expiresInSeconds)
@@ -246,6 +248,7 @@ class AuthRepository(
             Log.i(TAG, "Firebase JWT session refreshed successfully")
             true
         } catch (e: Exception) {
+            Log.e(TAG, "Firebase JWT session refresh failed: ${e.message}")
             if (session.expiresAt <= System.currentTimeMillis()) {
                 logout()
                 false
@@ -913,7 +916,10 @@ class AuthRepository(
             firebaseAuthProvider.updatePassword(newPassword)
 
             // Obtain a fresh ID token to call server-side RPC
-            val idToken = firebaseAuthProvider.getFreshAdminToken() ?: "fake_token"
+            val idToken = firebaseAuthProvider.getFreshAdminToken()
+                ?: return@withContext Result.failure(
+                    IllegalStateException("Could not obtain a Firebase ID token to finalize first login")
+                )
 
             // Call server-side function to mark first-login complete
             try {
